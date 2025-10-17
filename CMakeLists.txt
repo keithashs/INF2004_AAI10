@@ -46,5 +46,23 @@ set(CMAKE_CXX_STANDARD 17)
 # Initialize the Pico SDK
 pico_sdk_init()
 
+<<<<<<< Updated upstream
 # Build the firmware in car/
 add_subdirectory(car)
+=======
+
+add_compile_options(-Wall
+        -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
+        -Wno-unused-function # we have some for the docs that aren't called
+        )
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-Wno-maybe-uninitialized)
+endif()
+
+# Add the directory that contains FreeRTOSConfig.h 
+include_directories(${CMAKE_SOURCE_DIR})  # Add root directory to include path 
+
+if (NOT PICO_NO_HARDWARE) 
+    add_subdirectory(car)
+endif ()
+>>>>>>> Stashed changes
