@@ -43,7 +43,7 @@
 
 // Encoder parameters (adjust to your wheel/encoder)
 #define TICKS_PER_REV     20.0f   // encoder ticks per wheel revolution
-#define WHEEL_DIAMETER_M  0.025f  // 25 cm wheel diameter
+#define WHEEL_DIAMETER_M  0.025f  // 2.5 cm wheel diameter
 #define PI_F              3.1415926f
 
 // Speed scaling: 0..100% -> counts per second target

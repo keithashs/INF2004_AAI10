@@ -1,5 +1,5 @@
 #include "pico/stdlib.h"
-#include "pico/time.h" 
+#include "pico/time.h"
 #include "hardware/irq.h"
 #include <stdio.h>
 #include <math.h>
@@ -41,31 +41,24 @@ static void buttons_init(void) {
 
 // ----------------- IMU + Heading control @ 100 Hz -----------------
 static bool control_cb(repeating_timer_t* t) {
-    // Respect run/stop flag (passed via user_data)
     volatile bool* p_run = (volatile bool*)t->user_data;
-    if (!p_run || !*p_run) {
-        // Keep targets zero to avoid integrator wind-up while idle
-        motion_command(MOVE_STOP, 0);
-        return true;
-    }
+    if (!p_run || !*p_run) { motion_command(MOVE_STOP, 0); return true; }
 
     imu_state_t s;
     if (imu_read(&s) && s.ok) {
-        // Heading error: positive if we've rotated CW relative to initial reference
-        float heading_err = initial_heading_deg - s.heading_deg_filt;
-        // Wrap error to [-180, 180]
+        // Error: actual - desired (so positive err = rotated CW if heading increased)
+        float heading_err = s.heading_deg_filt - initial_heading_deg;
         while (heading_err > 180.0f) heading_err -= 360.0f;
         while (heading_err < -180.0f) heading_err += 360.0f;
 
-        const float dt = CONTROL_PERIOD_MS / 1000.0f;
-        // pid_step(setpoint=0, measured = -heading_err) => output drives error toward zero
-        float bias_cps = pid_step(&pid_heading, 0.0f, -heading_err, dt);
+        const float dt = CONTROL_PERIOD_MS / 100.0f; // 10 ms -> 0.1 s
+        // Drive error to zero: setpoint 0, measured = heading_err
+        float bias_cps = pid_step(&pid_heading, 0.0f, heading_err, dt);
 
-        // Apply differential bias: steer back toward the reference heading
-        // left gets -bias, right gets +bias
-        motion_command_with_bias(MOVE_FORWARD, run_speed_percent, -bias_cps, +bias_cps);
+        // IMPORTANT: positive bias turns LEFT wheel faster, RIGHT slower (counter-steer)
+        //             (flip signs vs earlier build that swung left)
+        motion_command_with_bias(MOVE_FORWARD, run_speed_percent, +bias_cps, -bias_cps);
 
-        // Lightweight IMU/heading telemetry (motor.c prints speed/distance too)
         static uint64_t last_imu_print = 0;
         uint64_t now_ms = to_ms_since_boot(get_absolute_time());
         if (now_ms - last_imu_print >= TELEMETRY_MS) {
@@ -83,72 +76,53 @@ static bool control_cb(repeating_timer_t* t) {
 
 int main() {
     stdio_init_all();
-    sleep_ms(1000); // give USB serial time to enumerate
+    sleep_ms(1000);
     printf("\n=== Car Demo 1: PID Speed + IMU Heading (Robo Pico) ===\n");
 
-    // Init subsystems
     buttons_init();
 
-    if (!imu_init()) {
-        printf("IMU init failed! Check I2C wiring (GP2 SDA, GP3 SCL) and power.\n");
-    } else {
-        printf("IMU ready.\n");
-    }
+    if (!imu_init()) printf("IMU init failed! Check I2C wiring (GP2 SDA, GP3 SCL) and power.\n");
+    else             printf("IMU ready.\n");
 
     motor_init();
 
-    // Motor PID + telemetry loop (runs forever in motor.c)
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
-
-    // IMU + heading control loop — pass &running as user_data so it idles until START is pressed
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
-    // ----------------- Main button loop -----------------
     while (true) {
         if (!running) {
-            // Idle: wait for START
             if (btn_pressed(BTN_START)) {
-                sleep_ms(30); // debounce
+                sleep_ms(30);
                 if (btn_pressed(BTN_START)) {
-                    // Capture current filtered heading as straight-line reference
                     imu_state_t s;
                     if (imu_read(&s) && s.ok) {
                         initial_heading_deg = s.heading_deg_filt;
                         imu_reset_heading_filter(initial_heading_deg);
                     } else {
-                        initial_heading_deg = 0.0f; // fallback
+                        initial_heading_deg = 0.0f;
                     }
 
                     pid_reset(&pid_heading);
                     motion_command(MOVE_FORWARD, run_speed_percent);
                     running = true;
-
-                    printf("START pressed -> moving forward at %d%%, heading_ref=%.1f deg\n",
-                           run_speed_percent, initial_heading_deg);
-
-                    // Wait for button release
+                    printf("START -> %d%%, heading_ref=%.1f deg\n", run_speed_percent, initial_heading_deg);
                     while (btn_pressed(BTN_START)) tight_loop_contents();
                 }
             } else {
-                // Stay fully stopped while idle
                 motor_all_stop();
             }
         } else {
-            // Running: allow STOP any time
             if (btn_pressed(BTN_STOP)) {
-                sleep_ms(30); // debounce
+                sleep_ms(30);
                 if (btn_pressed(BTN_STOP)) {
                     running = false;
                     motion_command(MOVE_STOP, 0);
                     motor_all_stop();
-                    printf("STOP pressed -> stopped.\n");
-
-                    // Wait for button release
+                    printf("STOP -> stopped.\n");
                     while (btn_pressed(BTN_STOP)) tight_loop_contents();
                 }
             }
         }
-
         tight_loop_contents();
     }
 }

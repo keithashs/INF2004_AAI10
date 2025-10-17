@@ -1,13 +1,12 @@
 #include "motor.h"
 #include "pico/stdlib.h"
-#include "pico/time.h" 
+#include "pico/time.h"
 #include "hardware/pwm.h"
 #include "hardware/irq.h"
 #include <stdio.h>
 #include <math.h>
 #include "pid.h"
 #include "config.h"
-
 
 static volatile uint32_t enc_count_m1 = 0, enc_count_m2 = 0;
 static volatile uint32_t enc_win_m1 = 0,  enc_win_m2 = 0;
@@ -16,6 +15,10 @@ static volatile float tgt_cps_m1 = 0.0f, tgt_cps_m2 = 0.0f;
 static volatile int dir_m1 = 0, dir_m2 = 0;
 static volatile float duty_m1 = 0.0f, duty_m2 = 0.0f;
 static volatile uint64_t last_telemetry_ms = 0;
+
+// NEW: simple IIR to smooth cps before PID (reduces 0/100 quantization jumps)
+static float cps_m1_f = 0.0f, cps_m2_f = 0.0f;
+static const float CPS_ALPHA = 0.60f;   // higher = smoother
 
 static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
@@ -101,11 +104,17 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     uint32_t w1 = enc_win_m1, w2 = enc_win_m2;
     enc_win_m1 = enc_win_m2 = 0;
 
-    float cps_m1 = (float)w1 / dt;
-    float cps_m2 = (float)w2 / dt;
+    // raw cps per 10 ms window
+    float cps_m1_raw = (float)w1 / dt;
+    float cps_m2_raw = (float)w2 / dt;
 
-    float out1 = pid_step(&pid_m1, tgt_cps_m1, cps_m1, dt);
-    float out2 = pid_step(&pid_m2, tgt_cps_m2, cps_m2, dt);
+    // IIR filter (reduces 0/100 cps quantization jitter)
+    cps_m1_f = CPS_ALPHA * cps_m1_f + (1.0f - CPS_ALPHA) * cps_m1_raw;
+    cps_m2_f = CPS_ALPHA * cps_m2_f + (1.0f - CPS_ALPHA) * cps_m2_raw;
+
+    // Use FILTERED cps for the velocity PID targets
+    float out1 = pid_step(&pid_m1, tgt_cps_m1, cps_m1_f, dt);
+    float out2 = pid_step(&pid_m2, tgt_cps_m2, cps_m2_f, dt);
 
     duty_m1 = out1; duty_m2 = out2;
 
@@ -122,11 +131,12 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float dist_m1 = revs_m1 * circ_m;
         float dist_m2 = revs_m2 * circ_m;
 
+        // Print RAW cps (so you can see counts), PID works on filtered cps internally
         printf("SPEED cps[M1=%.1f tgt=%.1f duty=%.1f%% dir=%d]  "
                "cps[M2=%.1f tgt=%.1f duty=%.1f%% dir=%d]  "
                "dist[m] L=%.3f R=%.3f\n",
-               cps_m1, tgt_cps_m1, duty_m1, dir_m1,
-               cps_m2, tgt_cps_m2, duty_m2, dir_m2,
+               cps_m1_raw, tgt_cps_m1, duty_m1, dir_m1,
+               cps_m2_raw, tgt_cps_m2, duty_m2, dir_m2,
                dist_m2, dist_m1);
     }
     return true;
@@ -134,7 +144,6 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
 
 void get_cps(float* cps_m1, float* cps_m2) {
     const float dt = CONTROL_PERIOD_MS / 1000.0f;
-    // quick estimate from last window contents (not perfectly atomic but fine for prints)
     *cps_m1 = (float)enc_win_m1 / dt;
     *cps_m2 = (float)enc_win_m2 / dt;
 }
