@@ -9,7 +9,7 @@ if (NOT PICO_SDK_PATH)
 endif()
 include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
-project(project C CXX)
+project(car C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
