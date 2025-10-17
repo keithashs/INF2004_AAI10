@@ -26,8 +26,9 @@ static int      win_idx = 0;
 
 // Extra low-pass after the 100ms average (reduces residual jitter)
 static float cps_m1_f = 0.0f, cps_m2_f = 0.0f;
-static const float CPS_ALPHA = 0.80f;   // stronger smoothing than before
+static const float CPS_ALPHA = 0.80f;   // stronger smoothing
 
+// Per-wheel velocity PIDs (tuned for smooth duty output)
 static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 
@@ -106,7 +107,6 @@ void motor_init(void) {
     encoder_init();
     pid_reset(&pid_m1); pid_reset(&pid_m2);
 
-    // init CPS averaging buffers
     for (int i = 0; i < CPS_AVG_TAPS; ++i) { win_hist_m1[i] = 0; win_hist_m2[i] = 0; }
     win_sum_m1 = win_sum_m2 = 0; win_idx = 0;
 }
@@ -114,11 +114,11 @@ void motor_init(void) {
 bool motor_control_timer_cb(repeating_timer_t *t) {
     const float dt = CONTROL_PERIOD_MS / 1000.0f; // 0.01 s
 
-    // Take window counts and clear for next 10ms
+    // Take 10ms window counts and reset
     uint32_t w1 = enc_win_m1, w2 = enc_win_m2;
     enc_win_m1 = enc_win_m2 = 0;
 
-    // --- 100 ms moving average of window counts ---
+    // 100 ms moving average of windows
     win_sum_m1 -= win_hist_m1[win_idx];
     win_sum_m2 -= win_hist_m2[win_idx];
     win_hist_m1[win_idx] = (uint16_t)w1;
@@ -143,7 +143,7 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     motor_set_signed(M1_IN1, M1_IN2, dir_m1, duty_m1);
     motor_set_signed(M2_IN1, M2_IN2, dir_m2, duty_m2);
 
-    // 5 Hz telemetry (single aligned line, unchanged)
+    // ---- Telemetry (5 Hz) ----
     uint64_t now_ms = to_ms_since_boot(get_absolute_time());
     if (now_ms - last_telemetry_ms >= TELEMETRY_MS) {
         last_telemetry_ms = now_ms;
@@ -159,6 +159,7 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float bias = g_bias_cps;
         bool  iok  = g_imu_ok;
 
+        // One aligned line
         printf("STAT "
                "M1[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "
                "M2[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "
@@ -178,11 +179,16 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     return true;
 }
 
+// ----- Helpers -----
 void get_cps(float* cps_m1, float* cps_m2) {
-    // return current 10ms-window cps (debug helper)
     const float dt = CONTROL_PERIOD_MS / 1000.0f;
     *cps_m1 = (float)enc_win_m1 / dt;
     *cps_m2 = (float)enc_win_m2 / dt;
+}
+
+void get_cps_smoothed(float* out_m1, float* out_m2) {
+    *out_m1 = cps_m1_f;
+    *out_m2 = cps_m2_f;
 }
 
 void get_distance_m(float* d_m1, float* d_m2) {
