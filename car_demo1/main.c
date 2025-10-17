@@ -9,13 +9,13 @@
 #include "imu.h"
 #include "pid.h"
 
-// Heading PID to keep straight (deg -> cps bias). Output biases the wheel setpoints.
+// Heading PID to keep straight (deg -> cps bias)
+// Gains unchanged; clamp will be updated dynamically per speed below.
 static PID pid_heading = {
     .kp = 6.0f, .ki = 0.0f, .kd = 0.5f,
     .integ = 0, .prev_err = 0,
-    .out_min = -30.0f, .out_max = +30.0f
+    .out_min = -20.0f, .out_max = +20.0f
 };
-// tune out_min/max to a small fraction of MAX_CPS so heading fix doesn't saturate speed
 
 // Timers
 static repeating_timer_t control_timer_motor;   // 10 ms: motor PID & telemetry (in motor.c)
@@ -26,11 +26,16 @@ static volatile bool running = false;
 
 // Demo settings
 static float initial_heading_deg = 0.0f;
-static int   run_speed_percent   = 100;
+static int   run_speed_percent   = 20;
+
+// ---- Telemetry cache (for single-line print from motor.c) ----
+volatile imu_state_t g_imu_last = {0};
+volatile float       g_heading_err_deg = 0.0f;
+volatile float       g_bias_cps        = 0.0f;
+volatile bool        g_imu_ok          = false;
 
 // ----------------- Buttons -----------------
 static inline bool btn_pressed(uint gpio) {
-    // Robo Pico buttons are typically pulled up; pressed == 0
     return gpio_get(gpio) == 0;
 }
 
@@ -46,30 +51,31 @@ static bool control_cb(repeating_timer_t* t) {
 
     imu_state_t s;
     if (imu_read(&s) && s.ok) {
-        // Error: actual - desired (so positive err = rotated CW if heading increased)
-        float heading_err = s.heading_deg_filt - initial_heading_deg;
-        while (heading_err > 180.0f) heading_err -= 360.0f;
-        while (heading_err < -180.0f) heading_err += 360.0f;
+        // Error: actual - desired (positive if rotated CW relative to reference)
+        float err = s.heading_deg_filt - initial_heading_deg;
+        while (err > 180.0f) err -= 360.0f;
+        while (err < -180.0f) err += 360.0f;
+
+        // --- Small deadband to avoid dither around zero ---
+        if (fabsf(err) < 2.0f) err = 0.0f;
+
+        // --- Scale heading clamp with current speed (≈60% of base CPS) ---
+        float base_cps = (MAX_CPS * (float)run_speed_percent) / 100.0f;
+        float bias_lim = fmaxf(5.0f, 0.6f * base_cps);   // at least 5 cps so it still steers when crawling
+        pid_heading.out_min = -bias_lim;
+        pid_heading.out_max = +bias_lim;
 
         const float dt = CONTROL_PERIOD_MS / 100.0f; // 10 ms -> 0.1 s
-        // Drive error to zero: setpoint 0, measured = heading_err
-        float bias_cps = pid_step(&pid_heading, 0.0f, heading_err, dt);
+        float bias = pid_step(&pid_heading, 0.0f, err, dt);
 
-        // IMPORTANT: positive bias turns LEFT wheel faster, RIGHT slower (counter-steer)
-        //             (flip signs vs earlier build that swung left)
-        motion_command_with_bias(MOVE_FORWARD, run_speed_percent, +bias_cps, -bias_cps);
+        // positive bias -> LEFT faster, RIGHT slower (counter-steer)
+        motion_command_with_bias(MOVE_FORWARD, run_speed_percent, +bias, -bias);
 
-        static uint64_t last_imu_print = 0;
-        uint64_t now_ms = to_ms_since_boot(get_absolute_time());
-        if (now_ms - last_imu_print >= TELEMETRY_MS) {
-            last_imu_print = now_ms;
-            float cps_r, cps_l; get_cps(&cps_r, &cps_l);
-            float d_r, d_l;     get_distance_m(&d_r, &d_l);
-            printf("IMU roll=%.1f pitch=%.1f head_raw=%.1f head_filt=%.1f err=%.1f  "
-                   "biasCPS=%.1f  Lcps=%.1f Rcps=%.1f  Lm=%.3f Rm=%.3f\n",
-                   s.roll_deg, s.pitch_deg, s.heading_deg, s.heading_deg_filt, heading_err,
-                   bias_cps, cps_l, cps_r, d_l, d_r);
-        }
+        // ---- Update telemetry cache (print happens in motor.c) ----
+        g_imu_last = s;
+        g_heading_err_deg = err;
+        g_bias_cps = bias;
+        g_imu_ok = true;
     }
     return true;
 }
@@ -101,7 +107,6 @@ int main() {
                     } else {
                         initial_heading_deg = 0.0f;
                     }
-
                     pid_reset(&pid_heading);
                     motion_command(MOVE_FORWARD, run_speed_percent);
                     running = true;
