@@ -5,27 +5,28 @@
 extern "C" {
 #endif
 
+// 2-pin (A/B) motor driven by hardware PWM on BOTH pins.
+// Sign-magnitude: +duty => A=PWM(mag), B=Low; -duty => A=Low, B=PWM(mag); 0 => brake (both Low)
+
 typedef struct {
-    uint     pwm_pin;   // EN (PWM)
-    uint     in1;       // IN1 / IN3
-    uint     in2;       // IN2 / IN4
-    uint     slice;     // PWM slice number
-    uint16_t top;       // PWM wrap value
+    uint     pinA;     // PWM-capable GPIO: MxA
+    uint     pinB;     // PWM-capable GPIO: MxB
+    uint     sliceA;   // PWM slice for A
+    uint     sliceB;   // PWM slice for B
+    uint16_t top;      // PWM wrap (TOP)
 } Motor;
 
-// Basic lifecycle
-void motor_init   (Motor *m, uint pwm_pin, uint in1, uint in2, float pwm_hz);
+// Initialize a 2-pin motor with desired PWM frequency (e.g., 20000 for 20 kHz)
+void motor_ab_init(Motor *m, uint pinA, uint pinB, float pwm_hz);
 
-// Simple commands
-void motor_forward(Motor *m, float duty);  // duty: 0..1
-void motor_stop   (Motor *m);
-void motor_brake  (Motor *m);
-void motor_set_duty(Motor *m, float duty); // duty: 0..1
+// Drive with signed duty in [-1..+1], sign=direction, |duty|=speed
+void motor_ab_drive(Motor *m, float signed_duty);
 
-// signed drive (-1..+1) using DIR pins internally
-void motor_drive(Motor *m, float signed_duty);
+// Stop styles
+void motor_ab_brake(Motor *m); // both Low
+void motor_ab_coast(Motor *m); // both High
 
-// convenience for a differential pair (LEFT, RIGHT)
+// Convenience for differential pair (LEFT, RIGHT)
 void robot_movement(Motor *left, Motor *right, float sL, float sR);
 
 #ifdef __cplusplus
