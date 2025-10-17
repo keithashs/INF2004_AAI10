@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "config.h"
-#include "pico/time.h"   // <-- add this for repeating_timer_t
+#include "pico/time.h"
 
 // Movement API
 typedef enum {
@@ -28,6 +28,7 @@ bool motor_control_timer_cb(repeating_timer_t *t);
 
 // Telemetry helpers
 void get_cps(float* cps_m1, float* cps_m2);
+void get_cps_smoothed(float* out_m1, float* out_m2);  // <-- ADDED: declare the smoothed CPS helper
 void get_distance_m(float* d_m1, float* d_m2);
 
 // Expose dirs for prints

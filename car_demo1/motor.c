@@ -7,7 +7,7 @@
 #include <math.h>
 #include "pid.h"
 #include "config.h"
-#include "imu.h"   // for telemetry cache (g_imu_last, etc.)
+#include "imu.h"   // for telemetry cache
 
 static volatile uint32_t enc_count_m1 = 0, enc_count_m2 = 0;
 static volatile uint32_t enc_win_m1 = 0,  enc_win_m2 = 0;
@@ -25,10 +25,10 @@ static uint32_t win_sum_m1 = 0, win_sum_m2 = 0;
 static int      win_idx = 0;
 
 // Extra low-pass after the 100ms average (reduces residual jitter)
+// Slightly less smoothing to reduce lag
 static float cps_m1_f = 0.0f, cps_m2_f = 0.0f;
-static const float CPS_ALPHA = 0.80f;   // stronger smoothing
+static const float CPS_ALPHA = 0.70f;
 
-// Per-wheel velocity PIDs (tuned for smooth duty output)
 static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 
@@ -112,9 +112,8 @@ void motor_init(void) {
 }
 
 bool motor_control_timer_cb(repeating_timer_t *t) {
-    const float dt = CONTROL_PERIOD_MS / 1000.0f; // 0.01 s
+    const float dt = CONTROL_PERIOD_MS / 1000.0f;
 
-    // Take 10ms window counts and reset
     uint32_t w1 = enc_win_m1, w2 = enc_win_m2;
     enc_win_m1 = enc_win_m2 = 0;
 
@@ -127,15 +126,13 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     win_sum_m2 += win_hist_m2[win_idx];
     win_idx = (win_idx + 1) % CPS_AVG_TAPS;
 
-    // Average cps over 100 ms (10 * 10ms)
     float cps_m1_raw = (float)win_sum_m1 / (CPS_AVG_TAPS * dt);
     float cps_m2_raw = (float)win_sum_m2 / (CPS_AVG_TAPS * dt);
 
-    // Extra IIR smoothing
+    // Extra IIR smoothing (less lag)
     cps_m1_f = CPS_ALPHA * cps_m1_f + (1.0f - CPS_ALPHA) * cps_m1_raw;
     cps_m2_f = CPS_ALPHA * cps_m2_f + (1.0f - CPS_ALPHA) * cps_m2_raw;
 
-    // Velocity PIDs on smoothed cps
     float out1 = pid_step(&pid_m1, tgt_cps_m1, cps_m1_f, dt);
     float out2 = pid_step(&pid_m2, tgt_cps_m2, cps_m2_f, dt);
     duty_m1 = out1; duty_m2 = out2;
@@ -159,7 +156,7 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float bias = g_bias_cps;
         bool  iok  = g_imu_ok;
 
-        // One aligned line
+        // Fix: label Left with left distance (dist_m2), Right with right (dist_m1)
         printf("STAT "
                "M1[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "
                "M2[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "

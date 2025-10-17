@@ -49,8 +49,8 @@
 // Speed scaling: 0..100% -> counts per second target
 #define MAX_CPS           100.0f  // tune this to your real peak CPS
 
-// Heading filter (0..1, higher = smoother)
-#define HEADING_ALPHA     0.90f
+// Heading filter (0..1, higher = smoother)  [reduced to respond faster]
+#define HEADING_ALPHA     0.75f
 
 // Magnetometer rough offsets/scale (tune later)
 #define MAG_OFF_X   0.0f
