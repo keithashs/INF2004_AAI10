@@ -24,13 +24,16 @@ static uint16_t win_hist_m2[CPS_AVG_TAPS] = {0};
 static uint32_t win_sum_m1 = 0, win_sum_m2 = 0;
 static int      win_idx = 0;
 
-// Extra low-pass after the 100ms average (reduces residual jitter)
-// Slightly less smoothing to reduce lag
+// Extra low-pass after the 100ms average
 static float cps_m1_f = 0.0f, cps_m2_f = 0.0f;
 static const float CPS_ALPHA = 0.70f;
 
 static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
+
+// New: per-wheel scale (compensate steady bias)
+static volatile float scale_right = 1.0f;
+static volatile float scale_left  = 1.0f;
 
 static inline uint16_t duty_from_percent(float pct) {
     if (pct < 0) pct = 0;
@@ -73,6 +76,9 @@ static inline float pct_to_cps(int percent) {
     return (MAX_CPS * (float)percent) / 100.0f;
 }
 
+void motor_set_wheel_scale(float sr, float sl) { scale_right = sr; scale_left = sl; }
+void motor_get_wheel_scale(float* sr, float* sl) { if (sr) *sr = scale_right; if (sl) *sl = scale_left; }
+
 void motion_command(move_t move, int speed_percent) {
     motion_command_with_bias(move, speed_percent, 0.0f, 0.0f);
 }
@@ -80,12 +86,24 @@ void motion_command(move_t move, int speed_percent) {
 void motion_command_with_bias(move_t move, int speed_percent, float left_bias_cps, float right_bias_cps) {
     float cps = pct_to_cps(speed_percent);
     switch (move) {
-        case MOVE_FORWARD:  dir_m1 = +1; dir_m2 = +1; tgt_cps_m1 = cps + right_bias_cps; tgt_cps_m2 = cps + left_bias_cps; break;
-        case MOVE_BACKWARD: dir_m1 = -1; dir_m2 = -1; tgt_cps_m1 = cps + right_bias_cps; tgt_cps_m2 = cps + left_bias_cps; break;
-        case MOVE_LEFT:     dir_m1 = +1; dir_m2 = -1; tgt_cps_m1 = cps; tgt_cps_m2 = cps; break;
-        case MOVE_RIGHT:    dir_m1 = -1; dir_m2 = +1; tgt_cps_m1 = cps; tgt_cps_m2 = cps; break;
+        case MOVE_FORWARD:
+            dir_m1 = +1; dir_m2 = +1;
+            // Apply per-wheel scaling to cancel systematic drift
+            tgt_cps_m1 = (cps + right_bias_cps) * scale_right; // right motor
+            tgt_cps_m2 = (cps + left_bias_cps)  * scale_left;  // left motor
+            break;
+        case MOVE_BACKWARD:
+            dir_m1 = -1; dir_m2 = -1;
+            tgt_cps_m1 = (cps + right_bias_cps) * scale_right;
+            tgt_cps_m2 = (cps + left_bias_cps)  * scale_left;
+            break;
+        case MOVE_LEFT:
+            dir_m1 = +1; dir_m2 = -1; tgt_cps_m1 = cps; tgt_cps_m2 = cps; break;
+        case MOVE_RIGHT:
+            dir_m1 = -1; dir_m2 = +1; tgt_cps_m1 = cps; tgt_cps_m2 = cps; break;
         case MOVE_STOP:
-        default:            dir_m1 = 0;  dir_m2 = 0;  tgt_cps_m1 = 0; tgt_cps_m2 = 0; break;
+        default:
+            dir_m1 = 0;  dir_m2 = 0;  tgt_cps_m1 = 0; tgt_cps_m2 = 0; break;
     }
 }
 
@@ -109,6 +127,7 @@ void motor_init(void) {
 
     for (int i = 0; i < CPS_AVG_TAPS; ++i) { win_hist_m1[i] = 0; win_hist_m2[i] = 0; }
     win_sum_m1 = win_sum_m2 = 0; win_idx = 0;
+    scale_right = 1.0f; scale_left = 1.0f;
 }
 
 bool motor_control_timer_cb(repeating_timer_t *t) {
@@ -129,7 +148,7 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     float cps_m1_raw = (float)win_sum_m1 / (CPS_AVG_TAPS * dt);
     float cps_m2_raw = (float)win_sum_m2 / (CPS_AVG_TAPS * dt);
 
-    // Extra IIR smoothing (less lag)
+    // Extra IIR smoothing
     cps_m1_f = CPS_ALPHA * cps_m1_f + (1.0f - CPS_ALPHA) * cps_m1_raw;
     cps_m2_f = CPS_ALPHA * cps_m2_f + (1.0f - CPS_ALPHA) * cps_m2_raw;
 
@@ -156,7 +175,6 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float bias = g_bias_cps;
         bool  iok  = g_imu_ok;
 
-        // Fix: label Left with left distance (dist_m2), Right with right (dist_m1)
         printf("STAT "
                "M1[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "
                "M2[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "

@@ -10,16 +10,16 @@
 #include "pid.h"
 
 // ================== PIDs ==================
-// 1) Wheel-balance (encoder-difference) PID: keeps cps_R ~ cps_L (fast, aggressive)
+// 1) Wheel-balance (encoder-difference) PID: keeps cps_R ~ cps_L (fast)
 static PID pid_track = {
     .kp = 0.90f, .ki = 1.8f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };
 
-// 2) IMU heading PID (slow trim): slightly stronger/faster
+// 2) IMU heading PID (slow trim)
 static PID pid_heading = {
-    .kp = 0.35f, .ki = 0.05f, .kd = 0.00f,
+    .kp = 0.40f, .ki = 0.08f, .kd = 0.00f,   // a tad stronger/faster
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };
@@ -31,7 +31,7 @@ static repeating_timer_t control_timer_imu;     // 10 ms: encoder-balance + IMU 
 // Run state (shared with control cb via user_data)
 static volatile bool running = false;
 
-// Demo settings (you may change only run_speed_percent to tune overall speed)
+// Demo settings
 static float initial_heading_deg = 0.0f;
 static int   run_speed_percent   = 20;
 
@@ -80,8 +80,8 @@ static bool control_cb(repeating_timer_t* t) {
     if (imu_ok) {
         float err_deg = wrap180(s.heading_deg_filt - initial_heading_deg);
 
-        // smaller deadband for quicker correction
-        if (fabsf(err_deg) < 1.0f) err_deg = 0.0f;
+        // small deadband: correct tiny drifts
+        if (fabsf(err_deg) < 0.6f) err_deg = 0.0f;
 
         bias_head = pid_step(&pid_heading, 0.0f, -err_deg, dt);
 
@@ -96,9 +96,8 @@ static bool control_cb(repeating_timer_t* t) {
     // Total bias (CPS) = fast track + slow heading
     float base_cps = (MAX_CPS * (float)run_speed_percent) / 100.0f;
 
-    // Keep track strong, but let heading do a bit more (30% of base)
-    float lim_track = fmaxf(5.0f, 0.50f * base_cps);
-    float lim_head  = fmaxf(2.0f, 0.30f * base_cps);
+    float lim_track = fmaxf(5.0f, 0.55f * base_cps);
+    float lim_head  = fmaxf(2.0f, 0.35f * base_cps);
 
     if (bias_track > +lim_track) bias_track = +lim_track;
     if (bias_track < -lim_track) bias_track = -lim_track;
@@ -121,10 +120,71 @@ static bool control_cb(repeating_timer_t* t) {
     return true;
 }
 
+// ======= Quick helpers for calibration at START =======
+
+// Spin in place for ~3 s to collect mag min/max
+static void do_mag_calibration(void) {
+    imu_cal_begin();
+    absolute_time_t t0 = get_absolute_time();
+    // spin left
+    motion_command(MOVE_LEFT, 25);
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 3000000) {
+        imu_state_t s;
+        if (imu_read(&s) && s.ok) { imu_cal_feed(&s); }
+        tight_loop_contents();
+    }
+    motion_command(MOVE_STOP, 0);
+    imu_cal_end();
+
+    // Seed heading filter with the current filtered value
+    imu_state_t s;
+    if (imu_read(&s) && s.ok) {
+        imu_reset_heading_filter(s.heading_deg_filt);
+        initial_heading_deg = s.heading_deg_filt;
+    }
+}
+
+// Drive straight gently for ~1.5 s to measure cps ratio and set scale
+static void do_auto_wheel_scale(void) {
+    // brief settle
+    motion_command(MOVE_FORWARD, 20);
+    sleep_ms(500);
+
+    // measure window
+    float sum_r = 0, sum_l = 0; int n = 0;
+    absolute_time_t t0 = get_absolute_time();
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 1500000) {
+        float r, l; get_cps_smoothed(&r, &l);
+        sum_r += r; sum_l += l; n++;
+        sleep_ms(10);
+    }
+    motion_command(MOVE_STOP, 0);
+
+    if (n > 0 && sum_l > 1.0f && sum_r > 1.0f) {
+        float r_avg = sum_r / (float)n;
+        float l_avg = sum_l / (float)n;
+
+        // ratio k = r/l ; symmetric scale: R*=1/sqrt(k), L*=sqrt(k)
+        float k  = r_avg / l_avg;
+        float sr = 1.0f / sqrtf(k);
+        float sl = sqrtf(k);
+
+        // Limit scales to sane bounds (±10%) — put each on its own line/braces to avoid -Wmisleading-indentation
+        if (sr < 0.90f) { sr = 0.90f; }
+        if (sr > 1.10f) { sr = 1.10f; }
+        if (sl < 0.90f) { sl = 0.90f; }
+        if (sl > 1.10f) { sl = 1.10f; }
+
+        motor_set_wheel_scale(sr, sl);
+    } else {
+        motor_set_wheel_scale(1.0f, 1.0f);
+    }
+}
+
 int main() {
     stdio_init_all();
     sleep_ms(1000);
-    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim) ===\n");
+    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal) ===\n");
 
     buttons_init();
 
@@ -141,6 +201,13 @@ int main() {
             if (btn_pressed(BTN_START)) {
                 sleep_ms(30);
                 if (btn_pressed(BTN_START)) {
+                    // 1) Mag calibration spin (3s) -> offsets/scales + heading seed
+                    do_mag_calibration();
+
+                    // 2) Wheel scale quick self-trim (1.5s gentle straight)
+                    do_auto_wheel_scale();
+
+                    // 3) Re-read heading and reset PIDs, then go
                     imu_state_t s;
                     if (imu_read(&s) && s.ok) {
                         initial_heading_deg = s.heading_deg_filt;
@@ -150,6 +217,7 @@ int main() {
                     }
                     pid_reset(&pid_track);
                     pid_reset(&pid_heading);
+
                     motion_command(MOVE_FORWARD, run_speed_percent);
                     running = true;
                     printf("START -> %d%%, heading_ref=%.1f deg\n", run_speed_percent, initial_heading_deg);

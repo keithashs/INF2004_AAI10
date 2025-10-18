@@ -7,6 +7,15 @@
 static float heading_filt = 0.0f;
 static bool  filt_init = false;
 
+// runtime mag offsets/scales (initialized from config.h)
+static float mag_off_x = MAG_OFF_X, mag_off_y = MAG_OFF_Y, mag_off_z = MAG_OFF_Z;
+static float mag_scl_x = MAG_SCL_X, mag_scl_y = MAG_SCL_Y, mag_scl_z = MAG_SCL_Z;
+
+// min/max capture for on-the-fly calibration
+static bool  cal_active = false;
+static float mag_min_x, mag_min_y, mag_min_z;
+static float mag_max_x, mag_max_y, mag_max_z;
+
 static int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
     uint8_t buf[2] = { reg, val };
     return i2c_write_blocking(I2C_PORT, addr, buf, 2, false);
@@ -59,7 +68,7 @@ bool imu_read(imu_state_t* out) {
     int16_t ay = (int16_t)((acc_raw[3] << 8) | acc_raw[2]);
     int16_t az = (int16_t)((acc_raw[5] << 8) | acc_raw[4]);
 
-    // LSM303DLHC acc 12-bit (left-justified in 16-bit); scale ~ 1 mg/LSB at ±2g (approx)
+    // LSM303DLHC acc approx scale at ±2g
     out->ax = ax / 16384.0f;
     out->ay = ay / 16384.0f;
     out->az = az / 16384.0f;
@@ -71,12 +80,22 @@ bool imu_read(imu_state_t* out) {
     int16_t mz_raw = (int16_t)((mag_raw[2] << 8) | mag_raw[3]);
     int16_t my_raw = (int16_t)((mag_raw[4] << 8) | mag_raw[5]);
 
-    // Simple offset/scale correction (calibrate later)
-    float mx = (mx_raw - MAG_OFF_X) * MAG_SCL_X;
-    float my = (my_raw - MAG_OFF_Y) * MAG_SCL_Y;
-    float mz = (mz_raw - MAG_OFF_Z) * MAG_SCL_Z;
+    // Apply runtime offset/scale (updated by calibration)
+    float mx = (mx_raw - mag_off_x) * mag_scl_x;
+    float my = (my_raw - mag_off_y) * mag_scl_y;
+    float mz = (mz_raw - mag_off_z) * mag_scl_z;
 
     out->mx = mx; out->my = my; out->mz = mz;
+
+    // During calibration, track min/max
+    if (cal_active) {
+        if (mx < mag_min_x) mag_min_x = mx;
+        if (my < mag_min_y) mag_min_y = my;
+        if (mz < mag_min_z) mag_min_z = mz;
+        if (mx > mag_max_x) mag_max_x = mx;
+        if (my > mag_max_y) mag_max_y = my;
+        if (mz > mag_max_z) mag_max_z = mz;
+    }
 
     // -------- Orientation from acc --------
     float roll  = atan2f(out->ay, out->az);
@@ -104,4 +123,36 @@ bool imu_read(imu_state_t* out) {
 void imu_reset_heading_filter(float init_heading_deg) {
     heading_filt = init_heading_deg;
     filt_init = true;
+}
+
+// ---- Simple mag calibration (min/max hard-iron + soft scale) ----
+void imu_cal_begin(void) {
+    cal_active = true;
+    mag_min_x = mag_min_y = mag_min_z =  1e9f;
+    mag_max_x = mag_max_y = mag_max_z = -1e9f;
+}
+void imu_cal_feed(const imu_state_t* s) {
+    // min/max updated inside imu_read while cal_active
+    (void)s;
+}
+void imu_cal_end(void) {
+    if (!cal_active) return;
+    cal_active = false;
+
+    // Offsets are midpoints
+    float off_x = 0.5f*(mag_max_x + mag_min_x);
+    float off_y = 0.5f*(mag_max_y + mag_min_y);
+    float off_z = 0.5f*(mag_max_z + mag_min_z);
+
+    // Radii
+    float r_x = 0.5f*(mag_max_x - mag_min_x);
+    float r_y = 0.5f*(mag_max_y - mag_min_y);
+    float r_z = 0.5f*(mag_max_z - mag_min_z);
+    float r_avg = (r_x + r_y + r_z) / 3.0f + 1e-6f;
+
+    // Soft-iron scale to sphere-ize
+    mag_off_x = off_x; mag_off_y = off_y; mag_off_z = off_z;
+    mag_scl_x = r_avg / r_x;
+    mag_scl_y = r_avg / r_y;
+    mag_scl_z = r_avg / r_z;
 }
