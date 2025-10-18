@@ -19,7 +19,7 @@ static PID pid_track = {
 
 // 2) IMU heading PID (slow trim)
 static PID pid_heading = {
-    .kp = 0.40f, .ki = 0.08f, .kd = 0.00f,   // a tad stronger/faster
+    .kp = 0.40f, .ki = 0.08f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };
@@ -28,8 +28,11 @@ static PID pid_heading = {
 static repeating_timer_t control_timer_motor;   // 10 ms: motor PID & telemetry (in motor.c)
 static repeating_timer_t control_timer_imu;     // 10 ms: encoder-balance + IMU trim (this file)
 
-// Run state (shared with control cb via user_data)
+// Run state
 static volatile bool running = false;
+
+// NEW: override so control_cb doesn't STOP motors during calibration/trim
+static volatile bool g_override_motion = false;
 
 // Demo settings
 static float initial_heading_deg = 0.0f;
@@ -47,7 +50,7 @@ static inline bool btn_pressed(uint gpio) {
 
 static void buttons_init(void) {
     gpio_init(BTN_START); gpio_set_dir(BTN_START, GPIO_IN); gpio_pull_up(BTN_START);
-    gpio_init(BTN_STOP);  gpio_set_dir(BTN_STOP,  GPIO_IN); gpio_pull_up(BTN_STOP);
+    gpio_init(BTN_STOP);  gpio_set_dir(BTN_STOP,  GPIO_IN);  gpio_pull_up(BTN_STOP);
 }
 
 static inline float wrap180(float a) {
@@ -60,7 +63,14 @@ static inline float wrap180(float a) {
 // Does BOTH: (A) wheel-balance PID from encoders, (B) small IMU trim
 static bool control_cb(repeating_timer_t* t) {
     volatile bool* p_run = (volatile bool*)t->user_data;
-    if (!p_run || !*p_run) { motion_command(MOVE_STOP, 0); return true; }
+
+    // If not running and not in an override phase, keep motors stopped.
+    if (!p_run || !*p_run) {
+        if (!g_override_motion) {
+            motion_command(MOVE_STOP, 0);
+        }
+        return true;
+    }
 
     // Current smoothed cps from motor.c
     float cps_r, cps_l;
@@ -120,12 +130,16 @@ static bool control_cb(repeating_timer_t* t) {
     return true;
 }
 
-// ======= Quick helpers for calibration at START =======
+// ======= Helpers for calibration at START =======
 
 // Spin in place for ~3 s to collect mag min/max
 static void do_mag_calibration(void) {
+    printf("CAL: magnetometer min/max... spinning 3s\n");
+    g_override_motion = true;
     imu_cal_begin();
+
     absolute_time_t t0 = get_absolute_time();
+
     // spin left
     motion_command(MOVE_LEFT, 25);
     while (absolute_time_diff_us(t0, get_absolute_time()) < 3000000) {
@@ -134,7 +148,9 @@ static void do_mag_calibration(void) {
         tight_loop_contents();
     }
     motion_command(MOVE_STOP, 0);
+
     imu_cal_end();
+    g_override_motion = false;
 
     // Seed heading filter with the current filtered value
     imu_state_t s;
@@ -142,10 +158,14 @@ static void do_mag_calibration(void) {
         imu_reset_heading_filter(s.heading_deg_filt);
         initial_heading_deg = s.heading_deg_filt;
     }
+    printf("CAL: done. heading_ref=%.1f deg\n", initial_heading_deg);
 }
 
 // Drive straight gently for ~1.5 s to measure cps ratio and set scale
 static void do_auto_wheel_scale(void) {
+    printf("TRIM: auto wheel scale... driving 1.5s\n");
+    g_override_motion = true;
+
     // brief settle
     motion_command(MOVE_FORWARD, 20);
     sleep_ms(500);
@@ -169,16 +189,20 @@ static void do_auto_wheel_scale(void) {
         float sr = 1.0f / sqrtf(k);
         float sl = sqrtf(k);
 
-        // Limit scales to sane bounds (±10%) — put each on its own line/braces to avoid -Wmisleading-indentation
+        // Limit scales to sane bounds (±10%)
         if (sr < 0.90f) { sr = 0.90f; }
         if (sr > 1.10f) { sr = 1.10f; }
         if (sl < 0.90f) { sl = 0.90f; }
         if (sl > 1.10f) { sl = 1.10f; }
 
         motor_set_wheel_scale(sr, sl);
+        printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
     } else {
         motor_set_wheel_scale(1.0f, 1.0f);
+        printf("TRIM: skipped (low cps)\n");
     }
+
+    g_override_motion = false;
 }
 
 int main() {
@@ -224,7 +248,8 @@ int main() {
                     while (btn_pressed(BTN_START)) tight_loop_contents();
                 }
             } else {
-                motor_all_stop();
+                // keep motors idle when not calibrating
+                if (!g_override_motion) motor_all_stop();
             }
         } else {
             if (btn_pressed(BTN_STOP)) {
