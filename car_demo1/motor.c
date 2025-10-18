@@ -195,7 +195,7 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float bias = g_bias_cps;
         bool  iok  = g_imu_ok;
 
-        // Print IMU weight w=...
+        // One straight, padded status line (no MAG CAL appended)
         printf("STAT "
                "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
                "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "

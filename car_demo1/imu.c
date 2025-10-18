@@ -1,3 +1,4 @@
+// imu.c
 #include "imu.h"
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
@@ -15,6 +16,10 @@ static float mag_scl_x = MAG_SCL_X, mag_scl_y = MAG_SCL_Y, mag_scl_z = MAG_SCL_Z
 static bool  cal_active = false;
 static float mag_min_x, mag_min_y, mag_min_z;
 static float mag_max_x, mag_max_y, mag_max_z;
+
+// RAW min/max used to compute offsets/scales (the correct data source)
+static float raw_min_x, raw_min_y, raw_min_z;
+static float raw_max_x, raw_max_y, raw_max_z;
 
 static int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
     uint8_t buf[2] = { reg, val };
@@ -87,6 +92,16 @@ bool imu_read(imu_state_t* out) {
     int16_t mz_raw = (int16_t)((mag_raw[2] << 8) | mag_raw[3]);
     int16_t my_raw = (int16_t)((mag_raw[4] << 8) | mag_raw[5]);
 
+    // track RAW min/max during calibration (before corrections)
+    if (cal_active) {
+        if (mx_raw < raw_min_x) raw_min_x = mx_raw;
+        if (my_raw < raw_min_y) raw_min_y = my_raw;
+        if (mz_raw < raw_min_z) raw_min_z = mz_raw;
+        if (mx_raw > raw_max_x) raw_max_x = mx_raw;
+        if (my_raw > raw_max_y) raw_max_y = my_raw;
+        if (mz_raw > raw_max_z) raw_max_z = mz_raw;
+    }
+
     // Apply runtime offset/scale (updated by calibration)
     float mx = (mx_raw - mag_off_x) * mag_scl_x;
     float my = (my_raw - mag_off_y) * mag_scl_y;
@@ -94,7 +109,7 @@ bool imu_read(imu_state_t* out) {
 
     out->mx = mx; out->my = my; out->mz = mz;
 
-    // During calibration, track min/max
+    // (optional) keep corrected min/max (useful if you later want to log/show coverage)
     if (cal_active) {
         if (mx < mag_min_x) mag_min_x = mx;
         if (my < mag_min_y) mag_min_y = my;
@@ -137,26 +152,37 @@ void imu_cal_begin(void) {
     cal_active = true;
     mag_min_x = mag_min_y = mag_min_z =  1e9f;
     mag_max_x = mag_max_y = mag_max_z = -1e9f;
+
+    // RAW min/max are used for actual calibration math
+    raw_min_x = raw_min_y = raw_min_z =  1e9f;
+    raw_max_x = raw_max_y = raw_max_z = -1e9f;
 }
+
 void imu_cal_feed(const imu_state_t* s) {
     (void)s; // min/max updated inside imu_read while cal_active
 }
+
 void imu_cal_end(void) {
     if (!cal_active) return;
     cal_active = false;
 
-    // Offsets are midpoints
-    float off_x = 0.5f*(mag_max_x + mag_min_x);
-    float off_y = 0.5f*(mag_max_y + mag_min_y);
-    float off_z = 0.5f*(mag_max_z + mag_min_z);
+    // compute offsets/scales from RAW min/max
+    float off_x = 0.5f * (raw_max_x + raw_min_x);
+    float off_y = 0.5f * (raw_max_y + raw_min_y);
+    float off_z = 0.5f * (raw_max_z + raw_min_z);
 
-    // Radii
-    float r_x = 0.5f*(mag_max_x - mag_min_x);
-    float r_y = 0.5f*(mag_max_y - mag_min_y);
-    float r_z = 0.5f*(mag_max_z - mag_min_z);
-    float r_avg = (r_x + r_y + r_z) / 3.0f + 1e-6f;
+    float r_x = 0.5f * (raw_max_x - raw_min_x);
+    float r_y = 0.5f * (raw_max_y - raw_min_y);
+    float r_z = 0.5f * (raw_max_z - raw_min_z);
 
-    // Soft-iron scale to sphere-ize
+    // clamp tiny radii to avoid massive scales if coverage was poor
+    const float R_MIN = 50.0f; // tune to your sensor's raw counts
+    if (r_x < R_MIN) r_x = R_MIN;
+    if (r_y < R_MIN) r_y = R_MIN;
+    if (r_z < R_MIN) r_z = R_MIN;
+
+    float r_avg = (r_x + r_y + r_z) / 3.0f;
+
     mag_off_x = off_x; mag_off_y = off_y; mag_off_z = off_z;
     mag_scl_x = r_avg / r_x;
     mag_scl_y = r_avg / r_y;
