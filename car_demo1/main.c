@@ -17,7 +17,7 @@ static PID pid_track = {
     .out_min = -100.0f, .out_max = +100.0f
 };
 
-// 2) IMU heading PID (slow trim) -- softened
+// 2) IMU heading PID (slow trim) -- conservative
 static PID pid_heading = {
     .kp = 0.25f, .ki = 0.04f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
@@ -59,6 +59,10 @@ static head_sup_t HS = {0};
 static absolute_time_t run_t0;
 static const float SOFTSTART_SEC = 0.8f;
 
+// ===== Adaptive scale state =====
+static float diff_lp = 0.0f;         // low-pass of encoder cps difference
+static float adapt_accum = 0.0f;     // period accumulator for scale updates
+
 static inline bool btn_pressed(uint gpio) {
     return gpio_get(gpio) == 0;
 }
@@ -81,7 +85,8 @@ static inline float clampf(float x, float lo, float hi) {
 }
 
 // ----------------- Fast control @ 100 Hz -----------------
-// Does BOTH: (A) wheel-balance PID from encoders, (B) IMU trim gated by health
+// Does BOTH: (A) wheel-balance PID from encoders, (B) IMU trim gated by health,
+// and (C) slow adaptive per-wheel scaling to cancel residual bias.
 static bool control_cb(repeating_timer_t* t) {
     volatile bool* p_run = (volatile bool*)t->user_data;
 
@@ -134,7 +139,7 @@ static bool control_cb(repeating_timer_t* t) {
             if (dt_s > 0.0005f) {
                 float d = wrap180(s.heading_deg_filt - HS.last_heading_deg);
                 float rate = fabsf(d) / dt_s; // deg/s
-                rate_ok = (rate <= 30.0f);    // was 45 -> 30 deg/s
+                rate_ok = (rate <= 30.0f);
                 HS.last_heading_deg = s.heading_deg_filt;
                 HS.last_t = now;
             }
@@ -176,8 +181,8 @@ static bool control_cb(repeating_timer_t* t) {
     float base_pct = (float)run_speed_percent;
     float pct_eff = base_pct;
     if (SOFTSTART_SEC > 0.0f) {
-        float t = absolute_time_diff_us(run_t0, get_absolute_time()) / 1e6f;
-        if (t < SOFTSTART_SEC) pct_eff = base_pct * (t / SOFTSTART_SEC);
+        float tsoft = absolute_time_diff_us(run_t0, get_absolute_time()) / 1e6f;
+        if (tsoft < SOFTSTART_SEC) pct_eff = base_pct * (tsoft / SOFTSTART_SEC);
     }
 
     float base_cps = (MAX_CPS * pct_eff) / 100.0f;
@@ -198,6 +203,36 @@ static bool control_cb(repeating_timer_t* t) {
     if (total_bias > +lim_total) total_bias = +lim_total;
     if (total_bias < -lim_total) total_bias = -lim_total;
 
+    // (C) ADAPTIVE WHEEL SCALE (very slow)
+    // Low-pass the encoder difference (favor long-term bias, not noise).
+    diff_lp = 0.98f * diff_lp + 0.02f * diff_meas;
+    adapt_accum += dt;
+
+    if (adapt_accum >= ADAPT_PERIOD_S && base_cps > 5.0f) {
+        float sr, sl;
+        motor_get_wheel_scale(&sr, &sl);
+
+        // If right is persistently faster (diff_lp > 0), reduce right scale a bit.
+        float rel = diff_lp / (base_cps + 1e-6f);             // dimensionless, ~[-1..+1]
+        float dscale = clampf(-ADAPT_GAIN * rel, -0.01f, 0.01f); // tiny step each update
+        sr += dscale;
+        sl -= dscale;
+
+        // Keep within safety bounds
+        sr = clampf(sr, SCALE_MIN, SCALE_MAX);
+        sl = clampf(sl, SCALE_MIN, SCALE_MAX);
+        motor_set_wheel_scale(sr, sl);
+
+        // Optional: print every few updates so we can see learning happen
+        static int adapt_print_div = 0;
+        if ((++adapt_print_div % 4) == 0) {
+            printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
+        }
+
+        adapt_accum = 0.0f;
+    }
+
+    // Command motion with final bias
     motion_command_with_bias(MOVE_FORWARD, (int)pct_eff, +total_bias, -total_bias);
 
     // Telemetry cache
@@ -268,10 +303,10 @@ static void do_auto_wheel_scale(void) {
         float sl = sqrtf(k);
 
         // Limit scales to sane bounds (±15% to allow stronger correction)
-        if (sr < 0.85f) { sr = 0.85f; }
-        if (sr > 1.15f) { sr = 1.15f; }
-        if (sl < 0.85f) { sl = 0.85f; }
-        if (sl > 1.15f) { sl = 1.15f; }
+        if (sr < SCALE_MIN) { sr = SCALE_MIN; }
+        if (sr > SCALE_MAX) { sr = SCALE_MAX; }
+        if (sl < SCALE_MIN) { sl = SCALE_MIN; }
+        if (sl > SCALE_MAX) { sl = SCALE_MAX; }
 
         motor_set_wheel_scale(sr, sl);
         printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
@@ -284,6 +319,7 @@ static void do_auto_wheel_scale(void) {
 }
 
 // ======= Boot-time auto calibration sequence =======
+// (unchanged)
 static void do_boot_auto_cal(void) {
     printf("BOOT: waiting 5s before auto calibration...\n");
     sleep_ms(5000);
@@ -302,7 +338,7 @@ static void do_boot_auto_cal(void) {
 int main() {
     stdio_init_all();
     sleep_ms(1000);
-    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal + Supervisor) ===\n");
+    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal + Supervisor + Adaptive scale) ===\n");
 
     buttons_init();
 
@@ -314,7 +350,7 @@ int main() {
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
-    // Boot auto calibration as you already had
+    // Boot auto calibration
     do_boot_auto_cal();
 
     while (true) {
@@ -348,6 +384,10 @@ int main() {
                     HS.initialized = false;
                     HS.head_weight = 0.0f;
                     g_head_weight  = 0.0f;
+
+                    // reset adaptive learners
+                    diff_lp = 0.0f;
+                    adapt_accum = 0.0f;
 
                     g_override_motion = false;
                     run_t0 = get_absolute_time();          // mark soft-start time

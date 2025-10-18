@@ -50,7 +50,7 @@
 #define MAX_CPS           100.0f  // tune this to your real peak CPS
 
 // Heading filter (0..1, higher = smoother)
-#define HEADING_ALPHA     0.85f
+#define HEADING_ALPHA     0.90f   // a touch smoother than before
 
 // --- Defaults for magnetometer calibration (overwritten at runtime) ---
 #define MAG_OFF_X   0.0f
@@ -59,3 +59,11 @@
 #define MAG_SCL_X   1.0f
 #define MAG_SCL_Y   1.0f
 #define MAG_SCL_Z   1.0f
+
+// ====== Adaptive wheel-scale learning ======
+#define SCALE_MIN          0.85f   // lower bound for per-wheel scale
+#define SCALE_MAX          1.15f   // upper bound
+#define ADAPT_PERIOD_S     0.50f   // update scales every ~0.5 s
+// How aggressively to change scale based on persistent encoder diff.
+// Effective step ~= ADAPT_GAIN * (diff/base_cps) clamped small each update.
+#define ADAPT_GAIN         0.08f   // start small; increase if learning is too slow
