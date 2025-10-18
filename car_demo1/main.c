@@ -19,7 +19,7 @@ static PID pid_track = {
 
 // 2) IMU heading PID (slow trim)
 static PID pid_heading = {
-    .kp = 0.40f, .ki = 0.08f, .kd = 0.00f,
+    .kp = 0.30f, .ki = 0.05f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };
@@ -31,7 +31,7 @@ static repeating_timer_t control_timer_imu;     // 10 ms: encoder-balance + IMU 
 // Run state
 static volatile bool running = false;
 
-// NEW: override so control_cb doesn't STOP motors during calibration/trim
+// Override so control_cb doesn't STOP motors during calibration/trim
 static volatile bool g_override_motion = false;
 
 // Demo settings
@@ -130,7 +130,7 @@ static bool control_cb(repeating_timer_t* t) {
     return true;
 }
 
-// ======= Helpers for calibration at START =======
+// ======= Calibration / Trim helpers =======
 
 // Spin in place for ~3 s to collect mag min/max
 static void do_mag_calibration(void) {
@@ -205,6 +205,22 @@ static void do_auto_wheel_scale(void) {
     g_override_motion = false;
 }
 
+// ======= Boot-time auto calibration sequence =======
+static void do_boot_auto_cal(void) {
+    printf("BOOT: waiting 5s before auto calibration...\n");
+    sleep_ms(5000);
+
+    // 3 s spin to calibrate mag + seed heading
+    do_mag_calibration();
+
+    // 1.5 s wheel auto-scale
+    do_auto_wheel_scale();
+
+    // stop motors and settle
+    motion_command(MOVE_STOP, 0);
+    printf("BOOT: auto calibration complete. Press START when ready.\n");
+}
+
 int main() {
     stdio_init_all();
     sleep_ms(1000);
@@ -217,38 +233,51 @@ int main() {
 
     motor_init();
 
+    // Start timers first so smoothing/telemetry run during routines
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
+
+    // ---- BOOT auto calibration sequence ----
+    do_boot_auto_cal();
 
     while (true) {
         if (!running) {
             if (btn_pressed(BTN_START)) {
                 sleep_ms(30);
                 if (btn_pressed(BTN_START)) {
-                    // 1) Mag calibration spin (3s) -> offsets/scales + heading seed
-                    do_mag_calibration();
+                    printf("START: settle 4s, capture heading_ref, then go.\n");
 
-                    // 2) Wheel scale quick self-trim (1.5s gentle straight)
-                    do_auto_wheel_scale();
-
-                    // 3) Re-read heading and reset PIDs, then go
+                    // Keep completely still for 4s, take fresh filtered heading
+                    g_override_motion = true;
+                    motion_command(MOVE_STOP, 0);
+                    absolute_time_t t0 = get_absolute_time();
                     imu_state_t s;
+                    while (absolute_time_diff_us(t0, get_absolute_time()) < 4000000) {
+                        if (imu_read(&s) && s.ok) {
+                            // just keep the filter updated while stationary
+                        }
+                        tight_loop_contents();
+                    }
+
+                    // Seed ref from current filtered heading; reset the filter so "moving IMU heading" matches start
                     if (imu_read(&s) && s.ok) {
                         initial_heading_deg = s.heading_deg_filt;
                         imu_reset_heading_filter(initial_heading_deg);
                     } else {
                         initial_heading_deg = 0.0f;
                     }
+
+                    // Reset PIDs and start motion
                     pid_reset(&pid_track);
                     pid_reset(&pid_heading);
 
+                    g_override_motion = false;
                     motion_command(MOVE_FORWARD, run_speed_percent);
                     running = true;
                     printf("START -> %d%%, heading_ref=%.1f deg\n", run_speed_percent, initial_heading_deg);
                     while (btn_pressed(BTN_START)) tight_loop_contents();
                 }
             } else {
-                // keep motors idle when not calibrating
                 if (!g_override_motion) motor_all_stop();
             }
         } else {

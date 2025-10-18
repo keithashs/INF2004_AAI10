@@ -50,7 +50,7 @@
 #define MAX_CPS           100.0f  // tune this to your real peak CPS
 
 // Heading filter (0..1, higher = smoother)
-#define HEADING_ALPHA     0.75f
+#define HEADING_ALPHA     0.85f
 
 // --- Defaults for magnetometer calibration (overwritten at runtime) ---
 #define MAG_OFF_X   0.0f

@@ -31,7 +31,7 @@ static const float CPS_ALPHA = 0.70f;
 static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 
-// New: per-wheel scale (compensate steady bias)
+// per-wheel scale (compensate steady bias)
 static volatile float scale_right = 1.0f;
 static volatile float scale_left  = 1.0f;
 
@@ -164,11 +164,18 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     if (now_ms - last_telemetry_ms >= TELEMETRY_MS) {
         last_telemetry_ms = now_ms;
 
+        // Distances (meters)
         float revs_m1 = (float)enc_count_m1 / TICKS_PER_REV;
         float revs_m2 = (float)enc_count_m2 / TICKS_PER_REV;
         float circ_m  = PI_F * WHEEL_DIAMETER_M;
         float dist_m1 = revs_m1 * circ_m;  // right motor distance
         float dist_m2 = revs_m2 * circ_m;  // left motor distance
+
+        // Convert CPS to speed (cm/s). speed = cps/TICKS_PER_REV * circumference(m) * 100
+        float m1_cmps      = (cps_m1_raw / TICKS_PER_REV) * circ_m * 100.0f;
+        float m2_cmps      = (cps_m2_raw / TICKS_PER_REV) * circ_m * 100.0f;
+        float tgt_m1_cmps  = (tgt_cps_m1  / TICKS_PER_REV) * circ_m * 100.0f;
+        float tgt_m2_cmps  = (tgt_cps_m2  / TICKS_PER_REV) * circ_m * 100.0f;
 
         imu_state_t s = g_imu_last;
         float err  = g_heading_err_deg;
@@ -176,13 +183,13 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         bool  iok  = g_imu_ok;
 
         printf("STAT "
-               "M1[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "
-               "M2[cps=%6.1f tgt=%6.1f duty=%6.1f%% dir=%2d]  "
-               "Dist[L=%7.3f R=%7.3f]  "
+               "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+               "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+               "Dist[L=%7.1fcm R=%7.1fcm]  "
                "IMU[roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f err=%6.1f bias=%6.1f %s]\n",
-               cps_m1_raw, tgt_cps_m1, duty_m1, dir_m1,
-               cps_m2_raw, tgt_cps_m2, duty_m2, dir_m2,
-               dist_m2, dist_m1,
+               m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
+               m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
+               dist_m2 * 100.0f, dist_m1 * 100.0f,
                iok ? s.roll_deg  : 0.0f,
                iok ? s.pitch_deg : 0.0f,
                iok ? s.heading_deg      : 0.0f,
