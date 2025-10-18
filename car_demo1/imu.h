@@ -26,3 +26,6 @@ extern volatile imu_state_t g_imu_last;
 extern volatile float       g_heading_err_deg;
 extern volatile float       g_bias_cps;
 extern volatile bool        g_imu_ok;
+
+// expose current IMU weight (0..1) so we can print it from motor.c
+extern volatile float       g_head_weight;

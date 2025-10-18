@@ -43,6 +43,7 @@ volatile imu_state_t g_imu_last = {0};
 volatile float       g_heading_err_deg = 0.0f;
 volatile float       g_bias_cps        = 0.0f;
 volatile bool        g_imu_ok          = false;
+volatile float       g_head_weight     = 0.0f;
 
 // ---- Heading supervisor (gate IMU influence) ----
 typedef struct {
@@ -53,6 +54,10 @@ typedef struct {
 } head_sup_t;
 
 static head_sup_t HS = {0};
+
+// Soft-start bookkeeping
+static absolute_time_t run_t0;
+static const float SOFTSTART_SEC = 0.8f;
 
 static inline bool btn_pressed(uint gpio) {
     return gpio_get(gpio) == 0;
@@ -110,19 +115,18 @@ static bool control_cb(repeating_timer_t* t) {
         // compute heading error
         float err_deg = wrap180(s.heading_deg_filt - initial_heading_deg);
 
-        // deadband
-        if (fabsf(err_deg) < 0.8f) err_deg = 0.0f;
+        // slightly larger deadband
+        if (fabsf(err_deg) < 2.0f) err_deg = 0.0f;
 
-        // --- heading supervisor: check sanity ---
-        // 1) tilt within bounds
-        bool tilt_ok = (fabsf(s.roll_deg) <= 15.0f) && (fabsf(s.pitch_deg) <= 15.0f);
+        // --- stricter supervisor thresholds ---
+        bool tilt_ok = (fabsf(s.roll_deg) <= 10.0f) && (fabsf(s.pitch_deg) <= 10.0f);
 
         // 2) heading rate limit (deg/s)
         float rate_ok = true;
         if (!HS.initialized) {
             HS.last_heading_deg = s.heading_deg_filt;
             HS.last_t = get_absolute_time();
-            HS.head_weight = 0.0f; // ramp in
+            HS.head_weight = 0.0f;
             HS.initialized = true;
         } else {
             absolute_time_t now = get_absolute_time();
@@ -130,8 +134,7 @@ static bool control_cb(repeating_timer_t* t) {
             if (dt_s > 0.0005f) {
                 float d = wrap180(s.heading_deg_filt - HS.last_heading_deg);
                 float rate = fabsf(d) / dt_s; // deg/s
-                // If heading is "whipping" faster than 45°/s, don't trust it
-                rate_ok = (rate <= 45.0f);
+                rate_ok = (rate <= 30.0f);    // was 45 -> 30 deg/s
                 HS.last_heading_deg = s.heading_deg_filt;
                 HS.last_t = now;
             }
@@ -140,8 +143,8 @@ static bool control_cb(repeating_timer_t* t) {
         bool healthy = tilt_ok && rate_ok;
 
         // Smoothly move head_weight toward 1 when healthy, toward 0 when not
-        float tau_up = 0.5f;   // seconds to trust IMU after it's healthy
-        float tau_dn = 0.15f;  // seconds to drop trust when unhealthy
+        float tau_up = 0.7f;   // slower ramp-in
+        float tau_dn = 0.10f;  // faster drop when unhealthy
         float a_up = clampf(dt / tau_up, 0.0f, 1.0f);
         float a_dn = clampf(dt / tau_dn, 0.0f, 1.0f);
 
@@ -150,6 +153,7 @@ static bool control_cb(repeating_timer_t* t) {
 
         head_weight = clampf(head_weight, 0.0f, 1.0f);
         HS.head_weight = head_weight;
+        g_head_weight  = head_weight;
 
         // IMU PID with weight
         float raw_bias_head = pid_step(&pid_heading, 0.0f, -err_deg, dt);
@@ -164,11 +168,19 @@ static bool control_cb(repeating_timer_t* t) {
         float a_dn = clampf(dt / 0.1f, 0.0f, 1.0f);
         head_weight = HS.head_weight + (0.0f - HS.head_weight) * a_dn;
         HS.head_weight = clampf(head_weight, 0.0f, 1.0f);
+        g_head_weight  = HS.head_weight;
         g_imu_ok = false;
     }
 
-    // Total bias (CPS) = fast track + gated heading trim
-    float base_cps = (MAX_CPS * (float)run_speed_percent) / 100.0f;
+    // Soft-start speed ramp over first ~0.8 s
+    float base_pct = (float)run_speed_percent;
+    float pct_eff = base_pct;
+    if (SOFTSTART_SEC > 0.0f) {
+        float t = absolute_time_diff_us(run_t0, get_absolute_time()) / 1e6f;
+        if (t < SOFTSTART_SEC) pct_eff = base_pct * (t / SOFTSTART_SEC);
+    }
+
+    float base_cps = (MAX_CPS * pct_eff) / 100.0f;
 
     float lim_track = fmaxf(5.0f, 0.55f * base_cps);
     float lim_head  = fmaxf(2.0f, 0.25f * base_cps); // tighter IMU clamp
@@ -186,7 +198,7 @@ static bool control_cb(repeating_timer_t* t) {
     if (total_bias > +lim_total) total_bias = +lim_total;
     if (total_bias < -lim_total) total_bias = -lim_total;
 
-    motion_command_with_bias(MOVE_FORWARD, run_speed_percent, +total_bias, -total_bias);
+    motion_command_with_bias(MOVE_FORWARD, (int)pct_eff, +total_bias, -total_bias);
 
     // Telemetry cache
     g_bias_cps = total_bias;
@@ -299,11 +311,10 @@ int main() {
 
     motor_init();
 
-    // Start timers first so smoothing/telemetry run during routines
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
-    // ---- BOOT auto calibration sequence ----
+    // Boot auto calibration as you already had
     do_boot_auto_cal();
 
     while (true) {
@@ -311,9 +322,9 @@ int main() {
             if (btn_pressed(BTN_START)) {
                 sleep_ms(30);
                 if (btn_pressed(BTN_START)) {
-                    printf("START: settle 4s, capture heading_ref, then go.\n");
+                    printf("START: settle 4s, capture heading_ref, then soft-start.\n");
 
-                    // Keep completely still for 4s, take fresh filtered heading
+                    // keep still 4 s to seed heading filter
                     g_override_motion = true;
                     motion_command(MOVE_STOP, 0);
                     absolute_time_t t0 = get_absolute_time();
@@ -322,8 +333,6 @@ int main() {
                         if (imu_read(&s) && s.ok) { /* keep filter updated */ }
                         tight_loop_contents();
                     }
-
-                    // Seed ref from current filtered heading; reset the filter so "moving IMU heading" matches start
                     if (imu_read(&s) && s.ok) {
                         initial_heading_deg = s.heading_deg_filt;
                         imu_reset_heading_filter(initial_heading_deg);
@@ -331,14 +340,18 @@ int main() {
                         initial_heading_deg = 0.0f;
                     }
 
-                    // Reset PIDs, supervisor and start motion
+                    // Reset everything to avoid the startup spike
                     pid_reset(&pid_track);
                     pid_reset(&pid_heading);
+                    motor_reset_controllers();
+                    motor_reset_speed_filters();
                     HS.initialized = false;
                     HS.head_weight = 0.0f;
+                    g_head_weight  = 0.0f;
 
                     g_override_motion = false;
-                    motion_command(MOVE_FORWARD, run_speed_percent);
+                    run_t0 = get_absolute_time();          // mark soft-start time
+                    motion_command(MOVE_FORWARD, 0);       // we’ll ramp inside control_cb
                     running = true;
                     printf("START -> %d%%, heading_ref=%.1f deg\n", run_speed_percent, initial_heading_deg);
                     while (btn_pressed(BTN_START)) tight_loop_contents();

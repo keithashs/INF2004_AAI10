@@ -38,3 +38,7 @@ void get_distance_m(float* d_m1, float* d_m2);
 // Expose dirs for prints
 int get_dir_m1(void);
 int get_dir_m2(void);
+
+// Clear the 100 ms moving average, IIR filters, and motor PIDs (for clean START)
+void motor_reset_speed_filters(void);
+void motor_reset_controllers(void);

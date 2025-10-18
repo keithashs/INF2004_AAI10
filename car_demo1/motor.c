@@ -7,7 +7,7 @@
 #include <math.h>
 #include "pid.h"
 #include "config.h"
-#include "imu.h"   // for telemetry cache
+#include "imu.h"   // for telemetry cache + g_head_weight
 
 static volatile uint32_t enc_count_m1 = 0, enc_count_m2 = 0;
 static volatile uint32_t enc_win_m1 = 0,  enc_win_m2 = 0;
@@ -17,7 +17,7 @@ static volatile int dir_m1 = 0, dir_m2 = 0;
 static volatile float duty_m1 = 0.0f, duty_m2 = 0.0f;
 static volatile uint64_t last_telemetry_ms = 0;
 
-// -------- CPS smoothing: 100 ms moving average of 10 x 10ms windows --------
+// -------- CPS smoothing: 100 ms moving average --------
 #define CPS_AVG_TAPS 10
 static uint16_t win_hist_m1[CPS_AVG_TAPS] = {0};
 static uint16_t win_hist_m2[CPS_AVG_TAPS] = {0};
@@ -127,7 +127,20 @@ void motor_init(void) {
 
     for (int i = 0; i < CPS_AVG_TAPS; ++i) { win_hist_m1[i] = 0; win_hist_m2[i] = 0; }
     win_sum_m1 = win_sum_m2 = 0; win_idx = 0;
+    cps_m1_f = cps_m2_f = 0.0f;
     scale_right = 1.0f; scale_left = 1.0f;
+}
+
+// Called on START
+void motor_reset_speed_filters(void) {
+    for (int i = 0; i < CPS_AVG_TAPS; ++i) { win_hist_m1[i] = 0; win_hist_m2[i] = 0; }
+    win_sum_m1 = win_sum_m2 = 0; win_idx = 0;
+    cps_m1_f = cps_m2_f = 0.0f;
+    enc_win_m1 = enc_win_m2 = 0; // window counts
+}
+
+void motor_reset_controllers(void) {
+    pid_reset(&pid_m1); pid_reset(&pid_m2);
 }
 
 bool motor_control_timer_cb(repeating_timer_t *t) {
@@ -182,11 +195,12 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float bias = g_bias_cps;
         bool  iok  = g_imu_ok;
 
+        // Print IMU weight w=...
         printf("STAT "
                "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
                "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
                "Dist[L=%7.1fcm R=%7.1fcm]  "
-               "IMU[roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f err=%6.1f bias=%6.1f %s]\n",
+               "IMU[roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f err=%6.1f bias=%6.1f w=%4.2f %s]\n",
                m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
                m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
                dist_m2 * 100.0f, dist_m1 * 100.0f,
@@ -196,6 +210,7 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
                iok ? s.heading_deg_filt : 0.0f,
                iok ? err : 0.0f,
                iok ? bias : 0.0f,
+               (double)g_head_weight,
                iok ? "" : "IMU=NA");
     }
     return true;
