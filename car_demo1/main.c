@@ -17,9 +17,9 @@ static PID pid_track = {
     .out_min = -100.0f, .out_max = +100.0f
 };
 
-// 2) IMU heading PID (slow trim)
+// 2) IMU heading PID (slow trim) -- softened
 static PID pid_heading = {
-    .kp = 0.30f, .ki = 0.05f, .kd = 0.00f,
+    .kp = 0.25f, .ki = 0.04f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };
@@ -44,6 +44,16 @@ volatile float       g_heading_err_deg = 0.0f;
 volatile float       g_bias_cps        = 0.0f;
 volatile bool        g_imu_ok          = false;
 
+// ---- Heading supervisor (gate IMU influence) ----
+typedef struct {
+    float last_heading_deg;
+    absolute_time_t last_t;
+    float head_weight;          // 0..1 multiplier on IMU bias
+    bool  initialized;
+} head_sup_t;
+
+static head_sup_t HS = {0};
+
 static inline bool btn_pressed(uint gpio) {
     return gpio_get(gpio) == 0;
 }
@@ -59,8 +69,14 @@ static inline float wrap180(float a) {
     return a;
 }
 
+static inline float clampf(float x, float lo, float hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
 // ----------------- Fast control @ 100 Hz -----------------
-// Does BOTH: (A) wheel-balance PID from encoders, (B) small IMU trim
+// Does BOTH: (A) wheel-balance PID from encoders, (B) IMU trim gated by health
 static bool control_cb(repeating_timer_t* t) {
     volatile bool* p_run = (volatile bool*)t->user_data;
 
@@ -83,31 +99,79 @@ static bool control_cb(repeating_timer_t* t) {
     // positive bias -> LEFT faster, RIGHT slower
     float bias_track = pid_step(&pid_track, 0.0f, -diff_meas, dt);
 
-    // (B) IMU heading small trim
+    // (B) IMU heading small trim, gated by supervisor
     float bias_head = 0.0f;
+    float head_weight = HS.head_weight; // default from previous step
+
     imu_state_t s;
     bool imu_ok = imu_read(&s) && s.ok;
+
     if (imu_ok) {
+        // compute heading error
         float err_deg = wrap180(s.heading_deg_filt - initial_heading_deg);
 
-        // small deadband: correct tiny drifts
-        if (fabsf(err_deg) < 0.6f) err_deg = 0.0f;
+        // deadband
+        if (fabsf(err_deg) < 0.8f) err_deg = 0.0f;
 
-        bias_head = pid_step(&pid_heading, 0.0f, -err_deg, dt);
+        // --- heading supervisor: check sanity ---
+        // 1) tilt within bounds
+        bool tilt_ok = (fabsf(s.roll_deg) <= 15.0f) && (fabsf(s.pitch_deg) <= 15.0f);
+
+        // 2) heading rate limit (deg/s)
+        float rate_ok = true;
+        if (!HS.initialized) {
+            HS.last_heading_deg = s.heading_deg_filt;
+            HS.last_t = get_absolute_time();
+            HS.head_weight = 0.0f; // ramp in
+            HS.initialized = true;
+        } else {
+            absolute_time_t now = get_absolute_time();
+            float dt_s = absolute_time_diff_us(HS.last_t, now) / 1e6f;
+            if (dt_s > 0.0005f) {
+                float d = wrap180(s.heading_deg_filt - HS.last_heading_deg);
+                float rate = fabsf(d) / dt_s; // deg/s
+                // If heading is "whipping" faster than 45°/s, don't trust it
+                rate_ok = (rate <= 45.0f);
+                HS.last_heading_deg = s.heading_deg_filt;
+                HS.last_t = now;
+            }
+        }
+
+        bool healthy = tilt_ok && rate_ok;
+
+        // Smoothly move head_weight toward 1 when healthy, toward 0 when not
+        float tau_up = 0.5f;   // seconds to trust IMU after it's healthy
+        float tau_dn = 0.15f;  // seconds to drop trust when unhealthy
+        float a_up = clampf(dt / tau_up, 0.0f, 1.0f);
+        float a_dn = clampf(dt / tau_dn, 0.0f, 1.0f);
+
+        if (healthy) head_weight = head_weight + (1.0f - head_weight) * a_up;
+        else         head_weight = head_weight + (0.0f - head_weight) * a_dn;
+
+        head_weight = clampf(head_weight, 0.0f, 1.0f);
+        HS.head_weight = head_weight;
+
+        // IMU PID with weight
+        float raw_bias_head = pid_step(&pid_heading, 0.0f, -err_deg, dt);
+        bias_head = raw_bias_head * head_weight;
 
         // Telemetry cache
         g_imu_last = s;
         g_heading_err_deg = err_deg;
         g_imu_ok = true;
     } else {
+        // IMU not available: ramp weight down
+        float a_dn = clampf(dt / 0.1f, 0.0f, 1.0f);
+        head_weight = HS.head_weight + (0.0f - HS.head_weight) * a_dn;
+        HS.head_weight = clampf(head_weight, 0.0f, 1.0f);
         g_imu_ok = false;
     }
 
-    // Total bias (CPS) = fast track + slow heading
+    // Total bias (CPS) = fast track + gated heading trim
     float base_cps = (MAX_CPS * (float)run_speed_percent) / 100.0f;
 
     float lim_track = fmaxf(5.0f, 0.55f * base_cps);
-    float lim_head  = fmaxf(2.0f, 0.35f * base_cps);
+    float lim_head  = fmaxf(2.0f, 0.25f * base_cps); // tighter IMU clamp
 
     if (bias_track > +lim_track) bias_track = +lim_track;
     if (bias_track < -lim_track) bias_track = -lim_track;
@@ -157,6 +221,8 @@ static void do_mag_calibration(void) {
     if (imu_read(&s) && s.ok) {
         imu_reset_heading_filter(s.heading_deg_filt);
         initial_heading_deg = s.heading_deg_filt;
+        HS.initialized = false; // re-init supervisor with new seed
+        HS.head_weight = 0.0f;
     }
     printf("CAL: done. heading_ref=%.1f deg\n", initial_heading_deg);
 }
@@ -189,11 +255,11 @@ static void do_auto_wheel_scale(void) {
         float sr = 1.0f / sqrtf(k);
         float sl = sqrtf(k);
 
-        // Limit scales to sane bounds (±10%)
-        if (sr < 0.90f) { sr = 0.90f; }
-        if (sr > 1.10f) { sr = 1.10f; }
-        if (sl < 0.90f) { sl = 0.90f; }
-        if (sl > 1.10f) { sl = 1.10f; }
+        // Limit scales to sane bounds (±15% to allow stronger correction)
+        if (sr < 0.85f) { sr = 0.85f; }
+        if (sr > 1.15f) { sr = 1.15f; }
+        if (sl < 0.85f) { sl = 0.85f; }
+        if (sl > 1.15f) { sl = 1.15f; }
 
         motor_set_wheel_scale(sr, sl);
         printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
@@ -224,7 +290,7 @@ static void do_boot_auto_cal(void) {
 int main() {
     stdio_init_all();
     sleep_ms(1000);
-    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal) ===\n");
+    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal + Supervisor) ===\n");
 
     buttons_init();
 
@@ -253,9 +319,7 @@ int main() {
                     absolute_time_t t0 = get_absolute_time();
                     imu_state_t s;
                     while (absolute_time_diff_us(t0, get_absolute_time()) < 4000000) {
-                        if (imu_read(&s) && s.ok) {
-                            // just keep the filter updated while stationary
-                        }
+                        if (imu_read(&s) && s.ok) { /* keep filter updated */ }
                         tight_loop_contents();
                     }
 
@@ -267,9 +331,11 @@ int main() {
                         initial_heading_deg = 0.0f;
                     }
 
-                    // Reset PIDs and start motion
+                    // Reset PIDs, supervisor and start motion
                     pid_reset(&pid_track);
                     pid_reset(&pid_heading);
+                    HS.initialized = false;
+                    HS.head_weight = 0.0f;
 
                     g_override_motion = false;
                     motion_command(MOVE_FORWARD, run_speed_percent);

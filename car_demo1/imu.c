@@ -26,6 +26,13 @@ static int i2c_read_regs(uint8_t addr, uint8_t reg, uint8_t* dst, size_t n) {
     return i2c_read_blocking(I2C_PORT, addr, dst, n, false);
 }
 
+// --- retry wrapper ---
+static inline bool read_with_retry(uint8_t addr, uint8_t reg, uint8_t* dst, size_t n) {
+    if (i2c_read_regs(addr, reg, dst, n) >= 0) return true;
+    sleep_us(200); // brief pause
+    return i2c_read_regs(addr, reg, dst, n) >= 0;
+}
+
 bool imu_init(void) {
     // I2C pins
     i2c_init(I2C_PORT, I2C_BAUD);
@@ -63,7 +70,7 @@ bool imu_read(imu_state_t* out) {
 
     // -------- ACC read (6 bytes, auto-increment starting at 0x28) --------
     uint8_t acc_raw[6];
-    if (i2c_read_regs(ACC_ADDR, ACC_REG_OUT_X_L | 0x80, acc_raw, 6) < 0) { out->ok=false; return false; }
+    if (!read_with_retry(ACC_ADDR, ACC_REG_OUT_X_L | 0x80, acc_raw, 6)) { out->ok=false; return false; }
     int16_t ax = (int16_t)((acc_raw[1] << 8) | acc_raw[0]);
     int16_t ay = (int16_t)((acc_raw[3] << 8) | acc_raw[2]);
     int16_t az = (int16_t)((acc_raw[5] << 8) | acc_raw[4]);
@@ -75,7 +82,7 @@ bool imu_read(imu_state_t* out) {
 
     // -------- MAG read (X,Z,Y order, 6 bytes starting at 0x03) --------
     uint8_t mag_raw[6];
-    if (i2c_read_regs(MAG_ADDR, 0x03, mag_raw, 6) < 0) { out->ok=false; return false; }
+    if (!read_with_retry(MAG_ADDR, 0x03, mag_raw, 6)) { out->ok=false; return false; }
     int16_t mx_raw = (int16_t)((mag_raw[0] << 8) | mag_raw[1]);
     int16_t mz_raw = (int16_t)((mag_raw[2] << 8) | mag_raw[3]);
     int16_t my_raw = (int16_t)((mag_raw[4] << 8) | mag_raw[5]);
@@ -132,8 +139,7 @@ void imu_cal_begin(void) {
     mag_max_x = mag_max_y = mag_max_z = -1e9f;
 }
 void imu_cal_feed(const imu_state_t* s) {
-    // min/max updated inside imu_read while cal_active
-    (void)s;
+    (void)s; // min/max updated inside imu_read while cal_active
 }
 void imu_cal_end(void) {
     if (!cal_active) return;
