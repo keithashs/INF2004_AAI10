@@ -57,7 +57,8 @@ static head_sup_t HS = {0};
 
 // Soft-start bookkeeping
 static absolute_time_t run_t0;
-static const float SOFTSTART_SEC = 0.8f;
+// Slightly shorter soft-start so we overcome stiction a bit quicker
+static const float SOFTSTART_SEC = 0.6f;
 
 // ===== Adaptive scale state =====
 static float diff_lp = 0.0f;         // low-pass of encoder cps difference
@@ -148,7 +149,7 @@ static bool control_cb(repeating_timer_t* t) {
         bool healthy = tilt_ok && rate_ok;
 
         // Smoothly move head_weight toward 1 when healthy, toward 0 when not
-        float tau_up = 0.7f;   // slower ramp-in
+        float tau_up = 0.5f;   // slower ramp-in
         float tau_dn = 0.10f;  // faster drop when unhealthy
         float a_up = clampf(dt / tau_up, 0.0f, 1.0f);
         float a_dn = clampf(dt / tau_dn, 0.0f, 1.0f);
@@ -272,24 +273,26 @@ static void do_mag_calibration(void) {
         HS.head_weight = 0.0f;
     }
 
+    printf("CAL: done. heading_ref=%.1f deg\n", initial_heading_deg);
     // Stop CAL prints after this stage
     telemetry_set_mode(TMODE_NONE);
 }
 
-// Drive straight gently for ~1.5 s to measure cps ratio and set scale
+// Drive straight gently for ~4.0 s to measure cps ratio and set scale
 static void do_auto_wheel_scale(void) {
+    printf("TRIM: auto wheel scale... driving 4.0s\n"); 
     telemetry_set_mode(TMODE_CAL);
 
     g_override_motion = true;
 
     // brief settle
-    motion_command(MOVE_FORWARD, 20);
+    motion_command(MOVE_FORWARD, 20); // same base cps for both sides
     sleep_ms(500);
 
-    // measure window
+    // measure window (4.0 s)
     float sum_r = 0, sum_l = 0; int n = 0;
     absolute_time_t t0 = get_absolute_time();
-    while (absolute_time_diff_us(t0, get_absolute_time()) < 1500000) {
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 4000000) {  // (4,000,000 us) = 4s
         float r, l; get_cps_smoothed(&r, &l);
         sum_r += r; sum_l += l; n++;
         sleep_ms(10);
@@ -312,10 +315,11 @@ static void do_auto_wheel_scale(void) {
         if (sl > SCALE_MAX) { sl = SCALE_MAX; }
 
         motor_set_wheel_scale(sr, sl);
-        // (No print here per your request — Scale will be shown at START banner)
+        printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
+        
     } else {
         motor_set_wheel_scale(1.0f, 1.0f);
-        // (No print)
+        printf("TRIM: skipped (low cps)\n");
     }
 
     g_override_motion = false;
@@ -324,13 +328,10 @@ static void do_auto_wheel_scale(void) {
 
 // ======= Boot-time auto calibration sequence =======
 static void do_boot_auto_cal(void) {
-    // Silence while waiting; we removed the previous waiting printf.
-    sleep_ms(10000);
-
     // 3 s spin to calibrate mag + seed heading
     do_mag_calibration();
 
-    // 1.5 s wheel auto-scale
+    // 4.0 s wheel auto-scale
     do_auto_wheel_scale();
 
     // stop motors and settle (silent)
