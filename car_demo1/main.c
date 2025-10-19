@@ -255,7 +255,7 @@ static void do_mag_calibration(void) {
     motion_command(MOVE_LEFT, 25);
     while (absolute_time_diff_us(t0, get_absolute_time()) < 3000000) {
         imu_state_t s;
-        if (imu_read(&s) && s.ok) { imu_cal_feed(&s); }
+        if (imu_read(&s) && s.ok) { /* keep filter updated while spinning */ }
         tight_loop_contents();
     }
     motion_command(MOVE_STOP, 0);
@@ -319,7 +319,6 @@ static void do_auto_wheel_scale(void) {
 }
 
 // ======= Boot-time auto calibration sequence =======
-// (unchanged)
 static void do_boot_auto_cal(void) {
     printf("BOOT: waiting 5s before auto calibration...\n");
     sleep_ms(5000);
@@ -358,8 +357,15 @@ int main() {
             if (btn_pressed(BTN_START)) {
                 sleep_ms(30);
                 if (btn_pressed(BTN_START)) {
+                    // print a one-time legend so the telemetry is self-explanatory
+                    printf("\nLEGEND:\n");
+                    printf("STAT M1[speed cm/s  tgt cm/s  duty %%  dir]  "
+                            "M2[speed cm/s  tgt cm/s  duty %%  dir]  "
+                            "Dist[L cm R cm]  "
+                            "IMU[roll deg pitch deg head deg filt deg err deg bias cps w]\n");
+                    printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
                     printf("START: settle 4s, capture heading_ref, then soft-start.\n");
-
+                    
                     // keep still 4 s to seed heading filter
                     g_override_motion = true;
                     motion_command(MOVE_STOP, 0);

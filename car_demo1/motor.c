@@ -236,3 +236,12 @@ void get_distance_m(float* d_m1, float* d_m2) {
 
 int get_dir_m1(void) { return dir_m1; }
 int get_dir_m2(void) { return dir_m2; }
+
+void print_telemetry_legend(void) {
+    printf("\nLEGEND:\n");
+    printf("STAT M1[speed cm/s  tgt cm/s  duty %%  dir]  "
+           "M2[speed cm/s  tgt cm/s  duty %%  dir]  "
+           "Dist[L cm R cm]  "
+           "IMU[roll deg pitch deg head deg filt deg err deg bias cps w]\n");
+    printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
+}

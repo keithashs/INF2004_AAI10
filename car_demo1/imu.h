@@ -18,7 +18,6 @@ void imu_reset_heading_filter(float init_heading_deg);
 
 // simple mag calibration helpers (min/max)
 void imu_cal_begin(void);                // start collecting min/max
-void imu_cal_feed(const imu_state_t* s); // feed samples while rotating the car in place
 void imu_cal_end(void);                  // compute offsets/scales and apply
 
 // --- Telemetry shared with motor loop ---

@@ -12,15 +12,12 @@ static bool  filt_init = false;
 static float mag_off_x = MAG_OFF_X, mag_off_y = MAG_OFF_Y, mag_off_z = MAG_OFF_Z;
 static float mag_scl_x = MAG_SCL_X, mag_scl_y = MAG_SCL_Y, mag_scl_z = MAG_SCL_Z;
 
-// min/max capture for on-the-fly calibration
-static bool  cal_active = false;
-static float mag_min_x, mag_min_y, mag_min_z;
-static float mag_max_x, mag_max_y, mag_max_z;
-
-// RAW min/max used to compute offsets/scales (the correct data source)
-static float raw_min_x, raw_min_y, raw_min_z;
+// During calibration we capture RAW min/max only
+static bool  cal_active = false;              // single flag governs RAW capture
+static float raw_min_x, raw_min_y, raw_min_z; // only RAW tracking kept
 static float raw_max_x, raw_max_y, raw_max_z;
 
+// I2C helpers
 static int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
     uint8_t buf[2] = { reg, val };
     return i2c_write_blocking(I2C_PORT, addr, buf, 2, false);
@@ -38,6 +35,18 @@ static inline bool read_with_retry(uint8_t addr, uint8_t reg, uint8_t* dst, size
     return i2c_read_regs(addr, reg, dst, n) >= 0;
 }
 
+// Math Helpers
+static inline float rad2deg(float r) { return r * (180.0f / PI_F); }
+static inline float deg_wrap_360(float d) {
+    while (d < 0.0f) d += 360.0f;
+    while (d >= 360.0f) d -= 360.0f;
+    return d;
+}
+static inline float lpf(float prev, float x, float alpha) {
+    return alpha * prev + (1.0f - alpha) * x;
+}
+
+// API
 bool imu_init(void) {
     // I2C pins
     i2c_init(I2C_PORT, I2C_BAUD);
@@ -57,17 +66,6 @@ bool imu_init(void) {
 
     filt_init = false;
     return true;
-}
-
-// Helpers
-static inline float rad2deg(float r) { return r * (180.0f / PI_F); }
-static inline float deg_wrap_360(float d) {
-    while (d < 0.0f) d += 360.0f;
-    while (d >= 360.0f) d -= 360.0f;
-    return d;
-}
-static inline float lpf(float prev, float x, float alpha) {
-    return alpha * prev + (1.0f - alpha) * x;
 }
 
 bool imu_read(imu_state_t* out) {
@@ -109,16 +107,6 @@ bool imu_read(imu_state_t* out) {
 
     out->mx = mx; out->my = my; out->mz = mz;
 
-    // (optional) keep corrected min/max (useful if you later want to log/show coverage)
-    if (cal_active) {
-        if (mx < mag_min_x) mag_min_x = mx;
-        if (my < mag_min_y) mag_min_y = my;
-        if (mz < mag_min_z) mag_min_z = mz;
-        if (mx > mag_max_x) mag_max_x = mx;
-        if (my > mag_max_y) mag_max_y = my;
-        if (mz > mag_max_z) mag_max_z = mz;
-    }
-
     // -------- Orientation from acc --------
     float roll  = atan2f(out->ay, out->az);
     float pitch = atan2f(-out->ax, sqrtf(out->ay*out->ay + out->az*out->az));
@@ -149,18 +137,12 @@ void imu_reset_heading_filter(float init_heading_deg) {
 
 // ---- Simple mag calibration (min/max hard-iron + soft scale) ----
 void imu_cal_begin(void) {
-    cal_active = true;
-    mag_min_x = mag_min_y = mag_min_z =  1e9f;
-    mag_max_x = mag_max_y = mag_max_z = -1e9f;
-
     // RAW min/max are used for actual calibration math
+    cal_active = true;
     raw_min_x = raw_min_y = raw_min_z =  1e9f;
     raw_max_x = raw_max_y = raw_max_z = -1e9f;
 }
 
-void imu_cal_feed(const imu_state_t* s) {
-    (void)s; // min/max updated inside imu_read while cal_active
-}
 
 void imu_cal_end(void) {
     if (!cal_active) return;
