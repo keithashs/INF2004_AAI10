@@ -320,9 +320,6 @@ static void do_auto_wheel_scale(void) {
 
 // ======= Boot-time auto calibration sequence =======
 static void do_boot_auto_cal(void) {
-    printf("BOOT: waiting 5s before auto calibration...\n");
-    sleep_ms(5000);
-
     // 3 s spin to calibrate mag + seed heading
     do_mag_calibration();
 
@@ -336,8 +333,9 @@ static void do_boot_auto_cal(void) {
 
 int main() {
     stdio_init_all();
-    sleep_ms(1000);
+    sleep_ms(10000);
     printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal + Supervisor + Adaptive scale) ===\n");
+    
 
     buttons_init();
 
@@ -350,6 +348,8 @@ int main() {
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
     // Boot auto calibration
+    printf("BOOT: waiting 10s before auto calibration...\n");
+    sleep_ms(10000);
     do_boot_auto_cal();
 
     while (true) {

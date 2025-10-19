@@ -200,15 +200,17 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
                "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
                "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
                "Dist[L=%7.1fcm R=%7.1fcm]  "
-               "IMU[roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f err=%6.1f bias=%6.1f w=%4.2f %s]\n",
+               "Scale[R=%5.3f L=%5.3f]  "
+               "IMU[err=%6.1f roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f bias=%6.1f w=%4.2f %s]\n",
                m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
                m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
                dist_m2 * 100.0f, dist_m1 * 100.0f,
+               (double)scale_right, (double)scale_left,
+               iok ? err : 0.0f,
                iok ? s.roll_deg  : 0.0f,
                iok ? s.pitch_deg : 0.0f,
                iok ? s.heading_deg      : 0.0f,
                iok ? s.heading_deg_filt : 0.0f,
-               iok ? err : 0.0f,
                iok ? bias : 0.0f,
                (double)g_head_weight,
                iok ? "" : "IMU=NA");
@@ -242,6 +244,7 @@ void print_telemetry_legend(void) {
     printf("STAT M1[speed cm/s  tgt cm/s  duty %%  dir]  "
            "M2[speed cm/s  tgt cm/s  duty %%  dir]  "
            "Dist[L cm R cm]  "
-           "IMU[roll deg pitch deg head deg filt deg err deg bias cps w]\n");
+           "Scale[R L]  "
+           "IMU[err deg roll deg pitch deg head deg filt deg bias cps w]\n");
     printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
 }
