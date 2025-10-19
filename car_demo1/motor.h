@@ -42,3 +42,19 @@ int get_dir_m2(void);
 // Clear the 100 ms moving average, IIR filters, and motor PIDs (for clean START)
 void motor_reset_speed_filters(void);
 void motor_reset_controllers(void);
+
+// Reset encoder distance counters to 0 (so Dist[L/R] prints start at 0.0cm after START)
+void motor_reset_distance_counters(void);
+
+// Telemetry print modes
+typedef enum {
+    TMODE_NONE = 0,  // print nothing (e.g., waiting / settle / soft-start)
+    TMODE_CAL  = 1,  // print "CAL ..." lines (no distance; IMU only if available)
+    TMODE_RUN  = 2   // print "STAT ..." lines (with distance)
+} telemetry_mode_t;
+
+// Set the current telemetry mode
+void telemetry_set_mode(telemetry_mode_t mode);
+
+// Helper to print the legend (unchanged)
+void print_telemetry_legend(void);

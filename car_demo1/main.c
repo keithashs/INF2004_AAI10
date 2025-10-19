@@ -223,11 +223,8 @@ static bool control_cb(repeating_timer_t* t) {
         sl = clampf(sl, SCALE_MIN, SCALE_MAX);
         motor_set_wheel_scale(sr, sl);
 
-        // Optional: print every few updates so we can see learning happen
-        static int adapt_print_div = 0;
-        if ((++adapt_print_div % 4) == 0) {
-            printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
-        }
+        // (Suppressed noisy background prints during run per request)
+        // printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
 
         adapt_accum = 0.0f;
     }
@@ -245,7 +242,10 @@ static bool control_cb(repeating_timer_t* t) {
 
 // Spin in place for ~3 s to collect mag min/max
 static void do_mag_calibration(void) {
+    // Print right when we enter this state (as requested)
     printf("CAL: magnetometer min/max... spinning 3s\n");
+    telemetry_set_mode(TMODE_CAL);
+
     g_override_motion = true;
     imu_cal_begin();
 
@@ -271,12 +271,15 @@ static void do_mag_calibration(void) {
         HS.initialized = false; // re-init supervisor with new seed
         HS.head_weight = 0.0f;
     }
-    printf("CAL: done. heading_ref=%.1f deg\n", initial_heading_deg);
+
+    // Stop CAL prints after this stage
+    telemetry_set_mode(TMODE_NONE);
 }
 
 // Drive straight gently for ~1.5 s to measure cps ratio and set scale
 static void do_auto_wheel_scale(void) {
-    printf("TRIM: auto wheel scale... driving 1.5s\n");
+    telemetry_set_mode(TMODE_CAL);
+
     g_override_motion = true;
 
     // brief settle
@@ -309,24 +312,28 @@ static void do_auto_wheel_scale(void) {
         if (sl > SCALE_MAX) { sl = SCALE_MAX; }
 
         motor_set_wheel_scale(sr, sl);
-        printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
+        // (No print here per your request — Scale will be shown at START banner)
     } else {
         motor_set_wheel_scale(1.0f, 1.0f);
-        printf("TRIM: skipped (low cps)\n");
+        // (No print)
     }
 
     g_override_motion = false;
+    telemetry_set_mode(TMODE_NONE);
 }
 
 // ======= Boot-time auto calibration sequence =======
 static void do_boot_auto_cal(void) {
+    // Silence while waiting; we removed the previous waiting printf.
+    sleep_ms(10000);
+
     // 3 s spin to calibrate mag + seed heading
     do_mag_calibration();
 
     // 1.5 s wheel auto-scale
     do_auto_wheel_scale();
 
-    // stop motors and settle
+    // stop motors and settle (silent)
     motion_command(MOVE_STOP, 0);
     printf("BOOT: auto calibration complete. Press START when ready.\n");
 }
@@ -335,7 +342,6 @@ int main() {
     stdio_init_all();
     sleep_ms(10000);
     printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal + Supervisor + Adaptive scale) ===\n");
-    
 
     buttons_init();
 
@@ -355,18 +361,18 @@ int main() {
     while (true) {
         if (!running) {
             if (btn_pressed(BTN_START)) {
-                sleep_ms(30);
+                sleep_ms(100);
                 if (btn_pressed(BTN_START)) {
                     // print a one-time legend so the telemetry is self-explanatory
-                    printf("\nLEGEND:\n");
-                    printf("STAT M1[speed cm/s  tgt cm/s  duty %%  dir]  "
-                            "M2[speed cm/s  tgt cm/s  duty %%  dir]  "
-                            "Dist[L cm R cm]  "
-                            "IMU[roll deg pitch deg head deg filt deg err deg bias cps w]\n");
-                    printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
-                    printf("START: settle 4s, capture heading_ref, then soft-start.\n");
-                    
-                    // keep still 4 s to seed heading filter
+                    print_telemetry_legend();
+
+                    // Print your required START banner line including current Scale values.
+                    float sr, sl;
+                    motor_get_wheel_scale(&sr, &sl);
+                    printf("START: settle 4s, capture heading_ref, then soft-start. Scale[R=%.3f L=%.3f]\n", sr, sl);
+
+                    // keep still 4 s to seed heading filter (silent)
+                    telemetry_set_mode(TMODE_NONE);
                     g_override_motion = true;
                     motion_command(MOVE_STOP, 0);
                     absolute_time_t t0 = get_absolute_time();
@@ -387,6 +393,10 @@ int main() {
                     pid_reset(&pid_heading);
                     motor_reset_controllers();
                     motor_reset_speed_filters();
+
+                    // Reset distances to 0.0cm for run prints
+                    motor_reset_distance_counters();
+
                     HS.initialized = false;
                     HS.head_weight = 0.0f;
                     g_head_weight  = 0.0f;
@@ -399,7 +409,11 @@ int main() {
                     run_t0 = get_absolute_time();          // mark soft-start time
                     motion_command(MOVE_FORWARD, 0);       // we’ll ramp inside control_cb
                     running = true;
+
+                    // Now announce START and enable run prints
                     printf("START -> %d%%, heading_ref=%.1f deg\n", run_speed_percent, initial_heading_deg);
+                    telemetry_set_mode(TMODE_RUN);
+
                     while (btn_pressed(BTN_START)) tight_loop_contents();
                 }
             } else {
@@ -410,6 +424,7 @@ int main() {
                 sleep_ms(30);
                 if (btn_pressed(BTN_STOP)) {
                     running = false;
+                    telemetry_set_mode(TMODE_NONE); // stop printing immediately
                     motion_command(MOVE_STOP, 0);
                     motor_all_stop();
                     printf("STOP -> stopped.\n");

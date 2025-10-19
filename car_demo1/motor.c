@@ -35,6 +35,9 @@ static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .o
 static volatile float scale_right = 1.0f;
 static volatile float scale_left  = 1.0f;
 
+// === Added: telemetry print mode state ===
+static telemetry_mode_t tmode = TMODE_NONE;
+
 static inline uint16_t duty_from_percent(float pct) {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
@@ -143,6 +146,17 @@ void motor_reset_controllers(void) {
     pid_reset(&pid_m1); pid_reset(&pid_m2);
 }
 
+// === Added: reset distances for STAT Dist[...] ===
+void motor_reset_distance_counters(void) {
+    enc_count_m1 = 0;
+    enc_count_m2 = 0;
+}
+
+// === Added: telemetry mode setter ===
+void telemetry_set_mode(telemetry_mode_t mode) {
+    tmode = mode;
+}
+
 bool motor_control_timer_cb(repeating_timer_t *t) {
     const float dt = CONTROL_PERIOD_MS / 1000.0f;
 
@@ -195,25 +209,44 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float bias = g_bias_cps;
         bool  iok  = g_imu_ok;
 
-        // One straight, padded status line (no MAG CAL appended)
-        printf("STAT "
-               "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-               "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-               "Dist[L=%7.1fcm R=%7.1fcm]  "
-               "Scale[R=%5.3f L=%5.3f]  "
-               "IMU[err=%6.1f roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f bias=%6.1f w=%4.2f %s]\n",
-               m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
-               m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
-               dist_m2 * 100.0f, dist_m1 * 100.0f,
-               (double)scale_right, (double)scale_left,
-               iok ? err : 0.0f,
-               iok ? s.roll_deg  : 0.0f,
-               iok ? s.pitch_deg : 0.0f,
-               iok ? s.heading_deg      : 0.0f,
-               iok ? s.heading_deg_filt : 0.0f,
-               iok ? bias : 0.0f,
-               (double)g_head_weight,
-               iok ? "" : "IMU=NA");
+        if (tmode == TMODE_RUN) {
+            // === RUN prints (your requested format, no Scale[] here) ===
+            printf("STAT "
+                   "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+                   "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+                   "Dist[L=%7.1fcm R=%7.1fcm]   "
+                   "IMU[err=%6.1f roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f bias=%6.1f w=%4.2f%s]\n",
+                   m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
+                   m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
+                   dist_m2 * 100.0f, dist_m1 * 100.0f,
+                   iok ? err : 0.0f,
+                   iok ? s.roll_deg  : 0.0f,
+                   iok ? s.pitch_deg : 0.0f,
+                   iok ? s.heading_deg      : 0.0f,
+                   iok ? s.heading_deg_filt : 0.0f,
+                   iok ? bias : 0.0f,
+                   (double)g_head_weight,
+                   iok ? "" : " IMU=NA");
+        } else if (tmode == TMODE_CAL) {
+            // === CAL prints: no Dist[], IMU only if available ===
+            if (iok) {
+                printf("CAL "
+                       "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+                       "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+                       "IMU[roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f err=%6.1f bias=%6.1f w=%4.2f]\n",
+                       m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
+                       m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
+                       s.roll_deg, s.pitch_deg, s.heading_deg, s.heading_deg_filt, err, bias, (double)g_head_weight);
+            } else {
+                printf("CAL "
+                       "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
+                       "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]\n",
+                       m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
+                       m2_cmps, tgt_m2_cmps, duty_m2, dir_m2);
+            }
+        } else {
+            // TMODE_NONE -> no telemetry
+        }
     }
     return true;
 }
@@ -244,7 +277,6 @@ void print_telemetry_legend(void) {
     printf("STAT M1[speed cm/s  tgt cm/s  duty %%  dir]  "
            "M2[speed cm/s  tgt cm/s  duty %%  dir]  "
            "Dist[L cm R cm]  "
-           "Scale[R L]  "
            "IMU[err deg roll deg pitch deg head deg filt deg bias cps w]\n");
     printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
 }
