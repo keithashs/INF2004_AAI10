@@ -42,12 +42,15 @@
 #define IMU_PERIOD_MS     10     // 100 Hz IMU polling
 
 // Encoder parameters (adjust to your wheel/encoder)
-#define TICKS_PER_REV     20.0f   // encoder ticks per wheel revolution
-#define WHEEL_DIAMETER_M  0.025f  // 2.5 cm wheel diameter
+#define TICKS_PER_REV     20.0f   // 20 rising edges per wheel rev (20 slots)
+#define WHEEL_DIAMETER_M  0.0635f // 6.35 cm drive wheel (measured)
 #define PI_F              3.1415926f
 
 // Speed scaling: 0..100% -> counts per second target
-#define MAX_CPS           100.0f  // tune this to your real peak CPS
+// M1(R) peak ≈ 54 cps (≈21.21 cm/s) M2(L) peak ≈ 50 cps (≈19.63 cm/s) - on air
+// M1(R) peak ≈ 47 cps (≈18.46 cm/s) M2(L) peak ≈ 45 cps (≈17.67 cm/s) - on ground
+// set to 45 cps on each wheel (≈17.67 cm/s with D=2.5 cm, TPR=20).
+#define MAX_CPS           45.0f
 
 // Heading filter (0..1, higher = smoother)
 #define HEADING_ALPHA     0.93f   // a touch smoother than before

@@ -17,6 +17,9 @@ static volatile int dir_m1 = 0, dir_m2 = 0;
 static volatile float duty_m1 = 0.0f, duty_m2 = 0.0f;
 static volatile uint64_t last_telemetry_ms = 0;
 
+// Odometry/reporting correction (does NOT affect control or MAX_CPS)
+static const float ODOM_CORR = 1.067f;   // ≈ 150 / (55.8 * (0.063/0.025))
+
 // -------- CPS smoothing: 100 ms moving average --------
 #define CPS_AVG_TAPS 10
 static uint16_t win_hist_m1[CPS_AVG_TAPS] = {0};
@@ -195,14 +198,14 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
         float revs_m1 = (float)enc_count_m1 / TICKS_PER_REV;
         float revs_m2 = (float)enc_count_m2 / TICKS_PER_REV;
         float circ_m  = PI_F * WHEEL_DIAMETER_M;
-        float dist_m1 = revs_m1 * circ_m;  // right motor distance
-        float dist_m2 = revs_m2 * circ_m;  // left motor distance
+        float dist_m1 = (revs_m1 * circ_m) * ODOM_CORR;  // right motor distance
+        float dist_m2 = (revs_m2 * circ_m) * ODOM_CORR;  // left motor distance
 
         // Convert CPS to speed (cm/s). speed = cps/TICKS_PER_REV * circumference(m) * 100
-        float m1_cmps      = (cps_m1_raw / TICKS_PER_REV) * circ_m * 100.0f;
-        float m2_cmps      = (cps_m2_raw / TICKS_PER_REV) * circ_m * 100.0f;
-        float tgt_m1_cmps  = (tgt_cps_m1  / TICKS_PER_REV) * circ_m * 100.0f;
-        float tgt_m2_cmps  = (tgt_cps_m2  / TICKS_PER_REV) * circ_m * 100.0f;
+        float m1_cmps      = (cps_m1_raw / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
+        float m2_cmps      = (cps_m2_raw / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
+        float tgt_m1_cmps  = (tgt_cps_m1  / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
+        float tgt_m2_cmps  = (tgt_cps_m2  / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
 
         imu_state_t s = g_imu_last;
         float err  = g_heading_err_deg;
