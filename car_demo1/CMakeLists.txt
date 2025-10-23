@@ -6,17 +6,25 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 pico_sdk_init()
 
 add_executable(${PROJECT_NAME}
-    main.c
-    motor.c
-    imu.c
-    pid.c
+    main/main.c
+    motor/motor.c
+    motor/motor.h
+    imu/imu.c
+    pid/pid.c
+    pid/pid.h
     config.h
-    motor.h
-    imu.h
-    pid.h
+    imu/imu.h
 )
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}            # car_demo1/ (for config.h, imu.h)
+    ${CMAKE_CURRENT_LIST_DIR}/main
+    ${CMAKE_CURRENT_LIST_DIR}/motor
+    ${CMAKE_CURRENT_LIST_DIR}/pid
+    ${CMAKE_CURRENT_LIST_DIR}/imu
+    ${CMAKE_CURRENT_LIST_DIR}/encorder   # future encoder headers
+    ${CMAKE_SOURCE_DIR}/wifi             # if main.c includes wifi headers later
+)
 
 target_link_libraries(${PROJECT_NAME}
     pico_stdlib

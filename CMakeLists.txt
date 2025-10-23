@@ -17,7 +17,6 @@ endif()
 # Initialize the SDK
 pico_sdk_init()
 
-
 add_compile_options(-Wall
         -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
         -Wno-unused-function # we have some for the docs that aren't called
@@ -27,7 +26,17 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 
 # Add the directory that contains FreeRTOSConfig.h 
-include_directories(${CMAKE_SOURCE_DIR})  # Add root directory to include path 
+include_directories(${CMAKE_SOURCE_DIR}/freertos_config)
+
+# ---- Wi-Fi & MQTT credentials
+if (DEFINED ENV{WIFI_SSID} AND NOT WIFI_SSID)
+    set(WIFI_SSID "$ENV{WIFI_SSID}")
+endif()
+if (DEFINED ENV{WIFI_PASSWORD} AND NOT WIFI_PASSWORD)
+    set(WIFI_PASSWORD "$ENV{WIFI_PASSWORD}")
+endif()
+set(WIFI_SSID "${WIFI_SSID}" CACHE STRING "WiFi SSID")
+set(WIFI_PASSWORD "${WIFI_PASSWORD}" CACHE STRING "WiFi Password")
 
 if (NOT PICO_NO_HARDWARE) 
     add_subdirectory(car_demo1)
