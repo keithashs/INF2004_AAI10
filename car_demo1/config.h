@@ -41,7 +41,7 @@
 #define TELEMETRY_MS      200    // 5 Hz prints
 #define IMU_PERIOD_MS     10     // 100 Hz IMU polling
 
-// Encoder parameters (adjust to your wheel/encoder)
+// Encoder parameters (adjust wheel/encoder)
 #define TICKS_PER_REV     20.0f   // 20 rising edges per wheel rev (20 slots)
 #define WHEEL_DIAMETER_M  0.0635f // 6.35 cm drive wheel (measured)
 #define PI_F              3.1415926f
