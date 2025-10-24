@@ -1,3 +1,4 @@
+# CMakeLists.txt root for car_demo1 project
 cmake_minimum_required(VERSION 3.12)
 
 # Pull in SDK (must be before project)
@@ -29,16 +30,35 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR}/freertos_config)
 
 # ---- Wi-Fi & MQTT credentials
-if (DEFINED ENV{WIFI_SSID} AND NOT WIFI_SSID)
-    set(WIFI_SSID "$ENV{WIFI_SSID}")
+# Add Pico W specific directories
+if (PICO_CYW43_SUPPORTED) # set by PICO_BOARD=pico_w
+    if (NOT TARGET pico_cyw43_arch)
+        message("Skipping Pico W examples as support is not available")
+    else()
+        if (DEFINED ENV{WIFI_SSID} AND (NOT WIFI_SSID))
+            set(WIFI_SSID $ENV{WIFI_SSID})
+            message("Using WIFI_SSID from environment ('${WIFI_SSID}')")
+        endif()
+
+        if (DEFINED ENV{WIFI_PASSWORD} AND (NOT WIFI_PASSWORD))
+            set(WIFI_PASSWORD $ENV{WIFI_PASSWORD})
+            message("Using WIFI_PASSWORD from environment")
+        endif()
+
+        set(WIFI_SSID "${WIFI_SSID}" CACHE INTERNAL "WiFi SSID for project")
+        set(WIFI_PASSWORD "${WIFI_PASSWORD}" CACHE INTERNAL "WiFi password for project")
+
+        # Add WiFi directories
+        if (NOT TARGET pico_btstack_base)
+            message("Skipping Pico W Bluetooth projects as support is not available")
+        else()
+            # Add bluetooth directories
+        endif()
+    endif()
 endif()
-if (DEFINED ENV{WIFI_PASSWORD} AND NOT WIFI_PASSWORD)
-    set(WIFI_PASSWORD "$ENV{WIFI_PASSWORD}")
-endif()
-set(WIFI_SSID "${WIFI_SSID}" CACHE STRING "WiFi SSID")
-set(WIFI_PASSWORD "${WIFI_PASSWORD}" CACHE STRING "WiFi Password")
+
 
 if (NOT PICO_NO_HARDWARE) 
+    add_subdirectory(dashboard/wifi)
     add_subdirectory(car_demo1)
-    add_subdirectory(wifi)
 endif ()

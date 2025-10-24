@@ -392,11 +392,40 @@ Can u explain detail to me the flow between each line of the code with the seria
 
 Show exactly full modified code here if for the part that is not modified type it out in exactly same format for me to copy and paste directly again.
 
+heading_ref=312.3 deg (initial_heading_deg) The heading captured at “START.” The direction your car should go straight toward.
+err: If you drift right (err positive), the system steers left. If you drift left (err negative), it steers right.
+err = +10°.
+The controller then commands the right wheel to slow down and left wheel to speed up (turning left to fix it).
+err = -10°.
+The controller does the opposite: speeds up right wheel, slows down left wheel.
+What the Deadband Does (±2°): That means if your heading only drifts a little (within ±2°), ignore it — it’s too small to matter and could cause oscillation (jittery steering).
 
-How to use it (quick steps)
+head is Current heading (°) Compass reading (0–360) (wraps around 360)
+filt=213.4 A low-pass filtered version of heading for smoothness. Like averaging your steering over the last second to avoid jitter.
+base_cps is target counts per second for each wheel at your chosen speed (e.g., 20 %).
+The IMU and encoder PIDs output a bias in cps (bias_head, bias_track), which represent how much faster or slower one wheel should spin to steer back.
+Meaning: 
+Right wheel gets +total_bias
+Left wheel gets −total_bias
 
-Flash this build. Place the car on a clear, magnetically clean floor (avoid rebar).
+w = HS.head_weight: Determined by IMU health (tilt, rate, etc.) in the supervisor block:
+If the IMU is stable and level → w rises toward 1.
+If it tilts or rotates too fast → w decays toward 0.
+It’s smoothed with time constants (tau_up, tau_dn) so the transition isn’t abrupt.
 
-Press START: it will spin ~3 s to calibrate mag, then roll forward ~1.5 s to self-trim wheel scales, then begin the straight run.
+if w = 1.0 → use 100% of the IMU heading correction.
+if w = 0.54 → use 54% of the IMU heading correction (still very much used).
+if w = 0.02 → use 2% (tiny, but not zero).
+if w = 0.00 → no IMU heading correction (only encoder-balance PID acts).
+Think of w as a “volume knob” for how loud the IMU’s voice is in steering.
+Think of w as a “volume knob” for how loud the IMU’s voice is in steering.
+This protects against magnetic spikes or tilt errors during motion.
 
-If you move to a different area with magnetic differences, press STOP then START again to re-calibrate.
+Interaction Between Encoders and IMU
+Encoder PID (pid_track) corrects short-term left/right imbalance (mechanical).
+IMU PID (pid_heading) corrects long-term directional drift (compass).
+Both biases combine into a total correction limited by lim_total (≈ 60 % of base speed).
+So:
+IMU gives absolute orientation,
+Encoders give relative speed balance,
+Together → smooth, straight travel with adaptive self-correction.
