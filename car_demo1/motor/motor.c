@@ -5,13 +5,12 @@
 #include "hardware/irq.h"
 #include <stdio.h>
 #include <math.h>
-#include "pid.h"
+#include "pid/pid.h"
 #include "config.h"
-#include "imu.h"   // for telemetry cache + g_head_weight
+#include "encoder/encoder.h"
+#include "imu/imu.h"            // for telemetry cache + g_head_weight
 
-static volatile uint32_t enc_count_m1 = 0, enc_count_m2 = 0;
-static volatile uint32_t enc_win_m1 = 0,  enc_win_m2 = 0;
-
+// --- Targets & state ---
 static volatile float tgt_cps_m1 = 0.0f, tgt_cps_m2 = 0.0f;
 static volatile int dir_m1 = 0, dir_m2 = 0;
 static volatile float duty_m1 = 0.0f, duty_m2 = 0.0f;
@@ -31,6 +30,7 @@ static int      win_idx = 0;
 static float cps_m1_f = 0.0f, cps_m2_f = 0.0f;
 static const float CPS_ALPHA = 0.70f;
 
+// PID controllers (duty output in %)
 static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
 
@@ -38,9 +38,10 @@ static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .o
 static volatile float scale_right = 1.0f;
 static volatile float scale_left  = 1.0f;
 
-// === Added: telemetry print mode state ===
+// Telemetry mode
 static telemetry_mode_t tmode = TMODE_NONE;
 
+// ------------- Helpers -------------
 static inline uint16_t duty_from_percent(float pct) {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
@@ -113,49 +114,48 @@ void motion_command_with_bias(move_t move, int speed_percent, float left_bias_cp
     }
 }
 
-static void encoder_isr_cb(uint gpio, uint32_t events) {
-    if (gpio == ENCODER_PIN_M1 && (events & GPIO_IRQ_EDGE_RISE)) { enc_count_m1++; enc_win_m1++; }
-    else if (gpio == ENCODER_PIN_M2 && (events & GPIO_IRQ_EDGE_RISE)) { enc_count_m2++; enc_win_m2++; }
-}
-
-void encoder_init(void) {
-    gpio_init(ENCODER_PIN_M1); gpio_set_dir(ENCODER_PIN_M1, GPIO_IN); gpio_pull_down(ENCODER_PIN_M1);
-    gpio_init(ENCODER_PIN_M2); gpio_set_dir(ENCODER_PIN_M2, GPIO_IN); gpio_pull_down(ENCODER_PIN_M2);
-    gpio_set_irq_enabled_with_callback(ENCODER_PIN_M1, GPIO_IRQ_EDGE_RISE, true, &encoder_isr_cb);
-    gpio_set_irq_enabled(ENCODER_PIN_M2, GPIO_IRQ_EDGE_RISE, true);
-}
-
 void motor_init(void) {
     setup_pwm(M1_IN1); setup_pwm(M1_IN2);
     setup_pwm(M2_IN1); setup_pwm(M2_IN2);
+
+    // init encoders
     encoder_init();
+
     pid_reset(&pid_m1); pid_reset(&pid_m2);
 
     for (int i = 0; i < CPS_AVG_TAPS; ++i) { win_hist_m1[i] = 0; win_hist_m2[i] = 0; }
     win_sum_m1 = win_sum_m2 = 0; win_idx = 0;
     cps_m1_f = cps_m2_f = 0.0f;
     scale_right = 1.0f; scale_left = 1.0f;
+
+    // “prime” the window sampler so first delta is zero
+    uint16_t dump1, dump2;
+    encoder_sample_window(&dump1, &dump2);
 }
 
-// Called on START
+// Called on START — reset only smoothing, not distance totals
 void motor_reset_speed_filters(void) {
     for (int i = 0; i < CPS_AVG_TAPS; ++i) { win_hist_m1[i] = 0; win_hist_m2[i] = 0; }
     win_sum_m1 = win_sum_m2 = 0; win_idx = 0;
     cps_m1_f = cps_m2_f = 0.0f;
-    enc_win_m1 = enc_win_m2 = 0; // window counts
+
+    // Reset the encoder window baseline (do NOT zero totals here)
+    uint16_t dump1, dump2;
+    encoder_sample_window(&dump1, &dump2);
 }
 
 void motor_reset_controllers(void) {
     pid_reset(&pid_m1); pid_reset(&pid_m2);
 }
 
-// === Added: reset distances for STAT Dist[...] ===
+// Reset odometry distance (totals) to zero
 void motor_reset_distance_counters(void) {
-    enc_count_m1 = 0;
-    enc_count_m2 = 0;
+    encoder_reset_all();          // zeros both totals and window baseline
+    // also clear smoothing so speed readouts start clean
+    motor_reset_speed_filters();
 }
 
-// === Added: telemetry mode setter ===
+// Telemetry mode setter
 void telemetry_set_mode(telemetry_mode_t mode) {
     tmode = mode;
 }
@@ -163,14 +163,15 @@ void telemetry_set_mode(telemetry_mode_t mode) {
 bool motor_control_timer_cb(repeating_timer_t *t) {
     const float dt = CONTROL_PERIOD_MS / 1000.0f;
 
-    uint32_t w1 = enc_win_m1, w2 = enc_win_m2;
-    enc_win_m1 = enc_win_m2 = 0;
+    // Get encoder ticks since last window sample
+    uint16_t w1 = 0, w2 = 0;
+    encoder_sample_window(&w1, &w2);
 
     // 100 ms moving average of windows
     win_sum_m1 -= win_hist_m1[win_idx];
     win_sum_m2 -= win_hist_m2[win_idx];
-    win_hist_m1[win_idx] = (uint16_t)w1;
-    win_hist_m2[win_idx] = (uint16_t)w2;
+    win_hist_m1[win_idx] = w1;
+    win_hist_m2[win_idx] = w2;
     win_sum_m1 += win_hist_m1[win_idx];
     win_sum_m2 += win_hist_m2[win_idx];
     win_idx = (win_idx + 1) % CPS_AVG_TAPS;
@@ -194,9 +195,11 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
     if (now_ms - last_telemetry_ms >= TELEMETRY_MS) {
         last_telemetry_ms = now_ms;
 
-        // Distances (meters)
-        float revs_m1 = (float)enc_count_m1 / TICKS_PER_REV;
-        float revs_m2 = (float)enc_count_m2 / TICKS_PER_REV;
+        // Distances (meters) from totals
+        uint32_t tot_m1 = encoder_total_m1();
+        uint32_t tot_m2 = encoder_total_m2();
+        float revs_m1 = (float)tot_m1 / TICKS_PER_REV;
+        float revs_m2 = (float)tot_m2 / TICKS_PER_REV;
         float circ_m  = PI_F * WHEEL_DIAMETER_M;
         float dist_m1 = (revs_m1 * circ_m) * ODOM_CORR;  // right motor distance
         float dist_m2 = (revs_m2 * circ_m) * ODOM_CORR;  // left motor distance
@@ -255,21 +258,26 @@ bool motor_control_timer_cb(repeating_timer_t *t) {
 }
 
 // ----- Helpers -----
-void get_cps(float* cps_m1, float* cps_m2) {
+void get_cps(float* out_cps_m1, float* out_cps_m2) {
+    // Note: this consumes a fresh window; callers should be aware of timing.
     const float dt = CONTROL_PERIOD_MS / 1000.0f;
-    *cps_m1 = (float)enc_win_m1 / dt;
-    *cps_m2 = (float)enc_win_m2 / dt;
+    uint16_t w1 = 0, w2 = 0;
+    encoder_sample_window(&w1, &w2);
+    if (out_cps_m1) *out_cps_m1 = (float)w1 / dt;
+    if (out_cps_m2) *out_cps_m2 = (float)w2 / dt;
 }
 
 void get_cps_smoothed(float* out_m1, float* out_m2) {
-    *out_m1 = cps_m1_f;
-    *out_m2 = cps_m2_f;
+    if (out_m1) *out_m1 = cps_m1_f;
+    if (out_m2) *out_m2 = cps_m2_f;
 }
 
 void get_distance_m(float* d_m1, float* d_m2) {
     float circ_m  = PI_F * WHEEL_DIAMETER_M;
-    *d_m1 = ((float)enc_count_m1 / TICKS_PER_REV) * circ_m;
-    *d_m2 = ((float)enc_count_m2 / TICKS_PER_REV) * circ_m;
+    uint32_t tot_m1 = encoder_total_m1();
+    uint32_t tot_m2 = encoder_total_m2();
+    if (d_m1) *d_m1 = ((float)tot_m1 / TICKS_PER_REV) * circ_m;
+    if (d_m2) *d_m2 = ((float)tot_m2 / TICKS_PER_REV) * circ_m;
 }
 
 int get_dir_m1(void) { return dir_m1; }

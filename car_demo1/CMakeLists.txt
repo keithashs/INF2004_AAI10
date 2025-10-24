@@ -14,24 +14,32 @@ add_executable(${PROJECT_NAME}
     pid/pid.h
     config.h
     imu/imu.h
+    encoder/encoder.c
+    encoder/encoder.h
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}            # car_demo1/ (for config.h, imu.h)
+    ${CMAKE_CURRENT_LIST_DIR}            # car_demo1/ (for config.h)
     ${CMAKE_CURRENT_LIST_DIR}/main
     ${CMAKE_CURRENT_LIST_DIR}/motor
     ${CMAKE_CURRENT_LIST_DIR}/pid
     ${CMAKE_CURRENT_LIST_DIR}/imu
-    ${CMAKE_CURRENT_LIST_DIR}/encorder   # future encoder headers
+    ${CMAKE_CURRENT_LIST_DIR}/encoder
     ${CMAKE_SOURCE_DIR}/wifi             # if main.c includes wifi headers later
+    # ${CMAKE_SOURCE_DIR}/freertos_config  # if FreeRTOSConfig.h is here
 )
 
 target_link_libraries(${PROJECT_NAME}
     pico_stdlib
-    hardware_pwm
     hardware_gpio
+    hardware_pwm
+    hardware_adc
     hardware_i2c
+    hardware_uart
+    hardware_timer
     hardware_irq
+    hardware_pio
+    # freertos_kernel
 )
 
 # USB serial on, UART off

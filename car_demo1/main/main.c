@@ -5,9 +5,9 @@
 #include <math.h>
 
 #include "config.h"
-#include "motor.h"
-#include "imu.h"
-#include "pid.h"
+#include "motor/motor.h"
+#include "imu/imu.h"
+#include "pid/pid.h"
 
 // ================== PIDs ==================
 // 1) Wheel-balance (encoder-difference) PID: keeps cps_R ~ cps_L (fast)
