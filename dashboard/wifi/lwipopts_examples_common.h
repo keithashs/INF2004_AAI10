@@ -1,4 +1,3 @@
-// dashboard/wifi/lwipopts_examples_common.h
 #ifndef _LWIPOPTS_EXAMPLE_COMMONH_H
 #define _LWIPOPTS_EXAMPLE_COMMONH_H
 

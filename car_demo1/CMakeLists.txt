@@ -41,7 +41,7 @@ target_link_libraries(${PROJECT_NAME}
     hardware_pio
 
     pico_lwip_mqtt
-    wifi_lib
+    wifi_mqtt
     pico_cyw43_arch_lwip_threadsafe_background
 )
 
@@ -49,26 +49,5 @@ target_link_libraries(${PROJECT_NAME}
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
 pico_enable_stdio_uart(${PROJECT_NAME} 0)
 
-# Enable float printf (handy for telemetry) + set your broker host
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    PICO_PRINTF_ALWAYS_INCLUDED=1
-    PICO_PRINTF_ALWAYS_INCLUDE_FLOAT=1
-)
-
-# Provide MQTT broker defaults if not provided elsewhere and export WiFi/MQTT
-# credentials from CMake into the C sources as macros so code can use them
-if (NOT DEFINED MQTT_BROKER_IP)
-    set(MQTT_BROKER_IP "172.20.10.2")
-endif()
-if (NOT DEFINED MQTT_BROKER_PORT)
-    set(MQTT_BROKER_PORT 1883)
-endif()
-
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    WIFI_SSID=\"${WIFI_SSID}\"
-    WIFI_PASSWORD=\"${WIFI_PASSWORD}\"
-    MQTT_BROKER_IP=\"${MQTT_BROKER_IP}\"
-    MQTT_BROKER_PORT=${MQTT_BROKER_PORT}
-)
 
 pico_add_extra_outputs(${PROJECT_NAME})
