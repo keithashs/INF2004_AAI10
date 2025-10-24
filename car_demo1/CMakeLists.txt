@@ -16,6 +16,8 @@ add_executable(${PROJECT_NAME}
     imu/imu.h
     encoder/encoder.c
     encoder/encoder.h
+    # MQTT client lives in your wifi/ folder — compile it into the app
+    ${CMAKE_SOURCE_DIR}/wifi/mqtt.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -26,7 +28,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/imu
     ${CMAKE_CURRENT_LIST_DIR}/encoder
     ${CMAKE_SOURCE_DIR}/wifi             # if main.c includes wifi headers later
-    # ${CMAKE_SOURCE_DIR}/freertos_config  # if FreeRTOSConfig.h is here
+    ${CMAKE_SOURCE_DIR}/freertos_config  # FreeRTOSConfig.h for the kernel
+    ${CMAKE_SOURCE_DIR}/FreeRTOS-Kernel-main/include
+    ${CMAKE_SOURCE_DIR}/FreeRTOS-Kernel-main/portable/ThirdParty/GCC/RP2040/include
 )
 
 target_link_libraries(${PROJECT_NAME}
