@@ -350,6 +350,7 @@ int main() {
     else             printf("IMU ready.\n");
 
     motor_init();
+    pid_init_defaults();
 
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
