@@ -9,21 +9,6 @@
 #include "imu/imu.h"
 #include "pid/pid.h"
 
-// ================== PIDs ==================
-// 1) Wheel-balance (encoder-difference) PID: keeps cps_R ~ cps_L (fast)
-static PID pid_track = {
-    .kp = 0.90f, .ki = 1.8f, .kd = 0.00f,
-    .integ = 0, .prev_err = 0,
-    .out_min = -100.0f, .out_max = +100.0f
-};
-
-// 2) IMU heading PID (slow trim) -- conservative
-static PID pid_heading = {
-    .kp = 0.25f, .ki = 0.04f, .kd = 0.00f,
-    .integ = 0, .prev_err = 0,
-    .out_min = -100.0f, .out_max = +100.0f
-};
-
 // Timers
 static repeating_timer_t control_timer_motor;   // 10 ms: motor PID & telemetry (in motor.c)
 static repeating_timer_t control_timer_imu;     // 10 ms: encoder-balance + IMU trim (this file)

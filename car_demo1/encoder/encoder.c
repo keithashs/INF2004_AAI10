@@ -42,8 +42,8 @@ void encoder_init(void) {
 
     // Enable IRQ on both edges to count stripes
     gpio_set_irq_enabled_with_callback(ENCODER_PIN_M1,
-        GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &encoder_gpio_irq);
-    gpio_set_irq_enabled(ENCODER_PIN_M2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+        GPIO_IRQ_EDGE_RISE, true, &encoder_gpio_irq);
+    gpio_set_irq_enabled(ENCODER_PIN_M2, GPIO_IRQ_EDGE_RISE, true);
 }
 
 void encoder_reset_all(void) {
