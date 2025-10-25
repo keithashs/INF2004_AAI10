@@ -26,7 +26,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/imu
     ${CMAKE_CURRENT_LIST_DIR}/encoder
     ${CMAKE_SOURCE_DIR}/wifi             # if main.c includes wifi headers later
-    # ${CMAKE_SOURCE_DIR}/freertos_config  # if FreeRTOSConfig.h is here
+    ${CMAKE_SOURCE_DIR}/freertos_config  # if FreeRTOSConfig.h is here
 )
 
 target_link_libraries(${PROJECT_NAME}
