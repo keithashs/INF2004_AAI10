@@ -168,7 +168,7 @@ static bool control_cb(repeating_timer_t* t) {
         bool healthy = tilt_ok && rate_ok;
 
         // Smoothly move head_weight toward 1 when healthy, toward 0 when not
-        float tau_up = 0.35f;   // ramp in faster so w rises sooner
+        float tau_up = 0.5f;   // slower ramp-in
         float tau_dn = 0.10f;  // faster drop when unhealthy
         float a_up = clampf(dt / tau_up, 0.0f, 1.0f);
         float a_dn = clampf(dt / tau_dn, 0.0f, 1.0f);
@@ -208,7 +208,7 @@ static bool control_cb(repeating_timer_t* t) {
     float base_cps = (MAX_CPS * pct_eff) / 100.0f;
 
     float lim_track = fmaxf(5.0f, 0.55f * base_cps);
-    float lim_head  = fmaxf(3.0f, 0.35f * base_cps); // tighter IMU clamp
+    float lim_head  = fmaxf(2.0f, 0.25f * base_cps); // tighter IMU clamp
 
     if (bias_track > +lim_track) bias_track = +lim_track;
     if (bias_track < -lim_track) bias_track = -lim_track;
