@@ -210,7 +210,7 @@ static bool control_cb(repeating_timer_t* t) {
         motor_set_wheel_scale(sr, sl);
 
         // (Suppressed noisy background prints during run per request)
-        // printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
+        printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
 
         adapt_accum = 0.0f;
     }

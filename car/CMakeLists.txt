@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-set(PROJECT_NAME car_demo1)
+set(PROJECT_NAME car)
 project(${PROJECT_NAME} C CXX ASM)
 
 # Submodules as libraries (RobotCar-style)

@@ -37,5 +37,5 @@ set(WIFI_SSID "${WIFI_SSID}" CACHE STRING "WiFi SSID")
 set(WIFI_PASSWORD "${WIFI_PASSWORD}" CACHE STRING "WiFi Password")
 
 if (NOT PICO_NO_HARDWARE) 
-    add_subdirectory(car_demo1)
+    add_subdirectory(car)
 endif ()
