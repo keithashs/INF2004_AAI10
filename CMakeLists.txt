@@ -17,13 +17,11 @@ endif()
 # Initialize the SDK
 pico_sdk_init()
 
-add_compile_options(-Wall
-        -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
-        -Wno-unused-function # we have some for the docs that aren't called
-        )
-if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    add_compile_options(-Wno-maybe-uninitialized)
-endif()
+add_compile_options(
+    -Wall
+    -Wno-format
+    -Wno-unused-function
+)
 
 # Add the directory that contains FreeRTOSConfig.h 
 include_directories(${CMAKE_SOURCE_DIR}/freertos_config)

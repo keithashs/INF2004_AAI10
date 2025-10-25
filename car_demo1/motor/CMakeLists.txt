@@ -1,0 +1,13 @@
+add_library(motor_lib motor.c)
+
+target_include_directories(motor_lib PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}           # motor/
+    ${CMAKE_CURRENT_LIST_DIR}/..        # car_demo1/
+    ${CMAKE_CURRENT_LIST_DIR}/../main   # so #include "config.h" still works
+)
+
+target_link_libraries(motor_lib
+    pico_stdlib
+    hardware_pwm
+    hardware_gpio
+)
