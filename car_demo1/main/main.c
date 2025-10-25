@@ -1,4 +1,3 @@
-// car_demo1/main/main.c
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "hardware/irq.h"
@@ -10,40 +9,9 @@
 #include "imu/imu.h"
 #include "pid/pid.h"
 
-/* ===== WiFi + MQTT (lwIP background arch) ===== */
-#include "mqtt_client.h"
-
-/*
- * Provide safe defaults when the build system does not pass these
- * as compile definitions. The dashboard example passes them for the
- * background `wifi_mqtt` target, but the `car_demo1` app may be
- * built separately and therefore must either receive them via
- * target_compile_definitions or use these fallbacks.
- */
-#ifndef WIFI_SSID
-#define WIFI_SSID "UNKNOWN_SSID"
-#warning "WIFI_SSID not defined; using default 'UNKNOWN_SSID'"
-#endif
-
-#ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD ""
-#warning "WIFI_PASSWORD not defined; using empty password"
-#endif
-
-#ifndef MQTT_BROKER_IP
-#define MQTT_BROKER_IP "127.0.0.1"
-#warning "MQTT_BROKER_IP not defined; using 127.0.0.1"
-#endif
-
-#ifndef MQTT_BROKER_PORT
-#define MQTT_BROKER_PORT 1883
-#warning "MQTT_BROKER_PORT not defined; using 1883"
-#endif
-
 // Timers
 static repeating_timer_t control_timer_motor;   // 10 ms: motor PID & telemetry (in motor.c)
 static repeating_timer_t control_timer_imu;     // 10 ms: encoder-balance + IMU trim (this file)
-static repeating_timer_t telemetry_timer;       // 200 ms: MQTT publish + poll
 
 // Run state
 static volatile bool running = false;
@@ -102,8 +70,6 @@ static inline float clampf(float x, float lo, float hi) {
     return x;
 }
 
-extern PID pid_track;
-extern PID pid_heading;
 // ----------------- Fast control @ 100 Hz -----------------
 // Does BOTH: (A) wheel-balance PID from encoders, (B) IMU trim gated by health,
 // and (C) slow adaptive per-wheel scaling to cancel residual bias.
@@ -168,7 +134,7 @@ static bool control_cb(repeating_timer_t* t) {
         bool healthy = tilt_ok && rate_ok;
 
         // Smoothly move head_weight toward 1 when healthy, toward 0 when not
-        float tau_up = 0.5f;   // slower ramp-in
+        float tau_up = 0.35f;   // ramp in faster so w rises sooner
         float tau_dn = 0.10f;  // faster drop when unhealthy
         float a_up = clampf(dt / tau_up, 0.0f, 1.0f);
         float a_dn = clampf(dt / tau_dn, 0.0f, 1.0f);
@@ -208,7 +174,7 @@ static bool control_cb(repeating_timer_t* t) {
     float base_cps = (MAX_CPS * pct_eff) / 100.0f;
 
     float lim_track = fmaxf(5.0f, 0.55f * base_cps);
-    float lim_head  = fmaxf(2.0f, 0.25f * base_cps); // tighter IMU clamp
+    float lim_head  = fmaxf(3.0f, 0.35f * base_cps); // tighter IMU clamp
 
     if (bias_track > +lim_track) bias_track = +lim_track;
     if (bias_track < -lim_track) bias_track = -lim_track;
@@ -244,7 +210,7 @@ static bool control_cb(repeating_timer_t* t) {
         motor_set_wheel_scale(sr, sl);
 
         // (Suppressed noisy background prints during run per request)
-        printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
+        // printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
 
         adapt_accum = 0.0f;
     }
@@ -255,58 +221,6 @@ static bool control_cb(repeating_timer_t* t) {
     // Telemetry cache
     g_bias_cps = total_bias;
 
-    return true;
-}
-
-/* ================= MQTT topics ================= */
-static const char *TOP_TELEM = "robot/telemetry";  // JSON status payloads
-static const char *TOP_EVENT = "robot/event";      // text events (START/STOP/etc)
-
-/* ================= MQTT publishing ================= */
-static void telemetry_publish_once(void) {
-    if (!mqtt_is_ready()) return;
-
-    float cps_r, cps_l; get_cps_smoothed(&cps_r, &cps_l);
-    float dR_m, dL_m;   get_distance_m(&dR_m, &dL_m);
-    int dirR = get_dir_m1(), dirL = get_dir_m2();
-
-    // Convert cps to cm/s using wheel circumference
-    const float circ_m = PI_F * WHEEL_DIAMETER_M;
-    float m1_cmps = (cps_r / TICKS_PER_REV) * circ_m * 100.0f;
-    float m2_cmps = (cps_l / TICKS_PER_REV) * circ_m * 100.0f;
-
-    float sr, sl; motor_get_wheel_scale(&sr, &sl);
-
-    uint32_t ts = to_ms_since_boot(get_absolute_time());
-    mqtt_publish_printf(TOP_TELEM, 0, false,
-        "{"
-          "\"ts\":%u,"
-          "\"m1_cmps\":%.2f,\"m2_cmps\":%.2f,"
-          "\"dirR\":%d,\"dirL\":%d,"
-          "\"dist_R_cm\":%.1f,\"dist_L_cm\":%.1f,"
-          "\"heading\":%.1f,\"heading_f\":%.1f,"
-          "\"imu_ok\":%d,"
-          "\"bias_cps\":%.2f,"
-          "\"w\":%.2f,"
-          "\"scale_R\":%.3f,\"scale_L\":%.3f"
-        "}",
-        (unsigned)ts,
-        m1_cmps, m2_cmps,
-        dirR, dirL,
-        dR_m*100.0f, dL_m*100.0f,
-        g_imu_last.heading_deg, g_imu_last.heading_deg_filt,
-        g_imu_ok ? 1 : 0,
-        g_bias_cps,
-        g_head_weight,
-        sr, sl
-    );
-}
-
-/* 200 ms periodic: keep MQTT alive + publish a snapshot */
-static bool telemetry_cb(repeating_timer_t* t) {
-    (void)t;
-    mqtt_poll();                 // drive reconnect pacing
-    telemetry_publish_once();   // publish if connected
     return true;
 }
 
@@ -410,58 +324,41 @@ static void do_boot_auto_cal(void) {
     printf("BOOT: auto calibration complete. Press START when ready.\n");
 }
 
-/* ===================== App task (moves your old main() here) ===================== */
-
-/* ===================== MAIN ===================== */
-int main(void) {
+int main() {
     stdio_init_all();
-    sleep_ms(3000);
-    printf("\n=== Car Demo 1: Cascaded Heading + MQTT Telemetry ===\n");
+    sleep_ms(10000);
+    printf("\n=== Car Demo 1: Cascaded Heading (Enc diff + IMU trim + Cal + Supervisor + Adaptive scale) ===\n");
 
     buttons_init();
 
-    if (!imu_init()) {
-        printf("IMU init failed! Check I2C wiring (GP2 SDA, GP3 SCL) and power.\n");
-    } else {
-        printf("IMU ready.\n");
-    }
+    if (!imu_init()) printf("IMU init failed! Check I2C wiring (GP2 SDA, GP3 SCL) and power.\n");
+    else             printf("IMU ready.\n");
 
     motor_init();
     pid_init_defaults();
-    encoder_init();
 
-    /* Timers: 100 Hz control (motor.c + this file) */
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
-    /* Boot auto-calibration (mag + wheel scale) */
-    printf("BOOT: waiting 3s before auto calibration...\n");
-    sleep_ms(3000);
+    // Boot auto calibration
+    printf("BOOT: waiting 10s before auto calibration...\n");
+    sleep_ms(10000);
     do_boot_auto_cal();
 
-    /* ---- Wi-Fi + MQTT bring-up (non-blocking) ---- */
-    /* Log which connection parameters are being used (do not print password) */
-    printf("[wifi] starting + MQTT... SSID='%s' broker=%s:%d\n", WIFI_SSID, MQTT_BROKER_IP, MQTT_BROKER_PORT);
-    mqtt_start(WIFI_SSID, WIFI_PASSWORD, MQTT_BROKER_IP, MQTT_BROKER_PORT);
-
-    /* 5 Hz telemetry & background MQTT polling */
-    add_repeating_timer_ms(-200, telemetry_cb, NULL, &telemetry_timer);
-
-    /* ---- Button loop ---- */
-    for (;;) {
+    while (true) {
         if (!running) {
             if (btn_pressed(BTN_START)) {
                 sleep_ms(100);
                 if (btn_pressed(BTN_START)) {
+                    // print a one-time legend so the telemetry is self-explanatory
                     print_telemetry_legend();
 
-                    float sr, sl; motor_get_wheel_scale(&sr, &sl);
+                    // Print your required START banner line including current Scale values.
+                    float sr, sl;
+                    motor_get_wheel_scale(&sr, &sl);
                     printf("START: settle 4s, capture heading_ref, then soft-start. Scale[R=%.3f L=%.3f]\n", sr, sl);
 
-                    if (mqtt_is_ready()) {
-                        mqtt_publish_printf(TOP_EVENT, 0, false, "START: settle-and-capture");
-                    }
-
+                    // keep still 4 s to seed heading filter (silent)
                     telemetry_set_mode(TMODE_NONE);
                     g_override_motion = true;
                     motion_command(MOVE_STOP, 0);
@@ -478,30 +375,31 @@ int main(void) {
                         initial_heading_deg = 0.0f;
                     }
 
+                    // Reset everything to avoid the startup spike
                     pid_reset(&pid_track);
                     pid_reset(&pid_heading);
                     motor_reset_controllers();
                     motor_reset_speed_filters();
+
+                    // Reset distances to 0.0cm for run prints
                     motor_reset_distance_counters();
 
                     HS.initialized = false;
                     HS.head_weight = 0.0f;
                     g_head_weight  = 0.0f;
 
+                    // reset adaptive learners
                     diff_lp = 0.0f;
                     adapt_accum = 0.0f;
 
                     g_override_motion = false;
-                    run_t0 = get_absolute_time();
-                    motion_command(MOVE_FORWARD, 0);
+                    run_t0 = get_absolute_time();          // mark soft-start time
+                    motion_command(MOVE_FORWARD, 0);       // we’ll ramp inside control_cb
                     running = true;
 
+                    // Now announce START and enable run prints
                     printf("START -> %d%%, heading_ref=%.1f deg\n", run_speed_percent, initial_heading_deg);
                     telemetry_set_mode(TMODE_RUN);
-                    if (mqtt_is_ready()) {
-                        mqtt_publish_printf(TOP_EVENT, 0, false, "START -> %d%% (heading_ref=%.1f)",
-                                      run_speed_percent, initial_heading_deg);
-                    }
 
                     while (btn_pressed(BTN_START)) tight_loop_contents();
                 }
@@ -513,18 +411,14 @@ int main(void) {
                 sleep_ms(30);
                 if (btn_pressed(BTN_STOP)) {
                     running = false;
-                    telemetry_set_mode(TMODE_NONE);
+                    telemetry_set_mode(TMODE_NONE); // stop printing immediately
                     motion_command(MOVE_STOP, 0);
                     motor_all_stop();
                     printf("STOP -> stopped.\n");
-                    if (mqtt_is_ready()) mqtt_publish_printf(TOP_EVENT, 0, false, "STOP");
                     while (btn_pressed(BTN_STOP)) tight_loop_contents();
                 }
             }
         }
-
-        // keep MQTT alive even if no timers fire (belt & suspenders)
-        mqtt_poll();
         tight_loop_contents();
     }
 }

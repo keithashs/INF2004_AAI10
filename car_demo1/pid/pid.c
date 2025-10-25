@@ -27,7 +27,7 @@ PID pid_track = {
 
 // 2) IMU heading PID (slow trim)
 PID pid_heading = {
-    .kp = 0.25f, .ki = 0.04f, .kd = 0.00f,
+    .kp = 0.35f, .ki = 0.04f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };
