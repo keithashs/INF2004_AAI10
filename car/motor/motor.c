@@ -128,7 +128,7 @@ void motor_init(void) {
     cps_m1_f = cps_m2_f = 0.0f;
     scale_right = 1.0f; scale_left = 1.0f;
 
-    // “prime” the window sampler so first delta is zero
+    // "prime" the window sampler so first delta is zero
     uint16_t dump1, dump2;
     encoder_sample_window(&dump1, &dump2);
 }
@@ -290,4 +290,40 @@ void print_telemetry_legend(void) {
            "Dist[L cm R cm]  "
            "IMU[err deg roll deg pitch deg head deg filt deg bias cps w]\n");
     printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
+}
+
+// Helper FUNCTIONS FOR DEMO2 SUPPORT
+
+// Get wheel speeds in cm/s (converted from smoothed CPS)
+void get_speed_cmps(float* left_cmps, float* right_cmps) {
+    float circ_m = PI_F * WHEEL_DIAMETER_M;
+    float cps_r, cps_l;
+    get_cps_smoothed(&cps_r, &cps_l);
+    
+    // Convert: cps / TICKS_PER_REV * circumference(m) * 100 * ODOM_CORR
+    if (right_cmps) *right_cmps = (cps_r / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
+    if (left_cmps)  *left_cmps  = (cps_l / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
+}
+
+// Get distances in cm (converted from meters)
+void get_distance_cm(float* left_cm, float* right_cm) {
+    float d_r_m, d_l_m;
+    get_distance_m(&d_r_m, &d_l_m);
+    
+    if (right_cm) *right_cm = d_r_m * 100.0f * ODOM_CORR;
+    if (left_cm)  *left_cm  = d_l_m * 100.0f * ODOM_CORR;
+}
+
+// Average speed in cm/s
+float get_average_speed_cmps(void) {
+    float left, right;
+    get_speed_cmps(&left, &right);
+    return (left + right) / 2.0f;
+}
+
+// Average distance in cm
+float get_average_distance_cm(void) {
+    float left, right;
+    get_distance_cm(&left, &right);
+    return (left + right) / 2.0f;
 }

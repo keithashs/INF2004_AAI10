@@ -167,6 +167,11 @@ int main(void) {
 
     pid_init_defaults();
 
+    // START MOTOR CONTROL TIMER (100 Hz)
+    static repeating_timer_t motor_control_timer;
+    add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &motor_control_timer);
+    printf("[DEMO2] Motor control timer started (100 Hz)\n");
+
     // Capture initial heading
     sleep_ms(500);
     imu_state_t imu;
@@ -200,8 +205,9 @@ int main(void) {
         bool imu_ok = imu_read(&imu_data) && imu_data.ok;
         float current_heading = imu_ok ? imu_data.heading_deg_filt : g_target_heading_deg;
 
-        float avg_speed = get_average_speed();  // cm/s
-        float avg_dist = get_average_distance();  // cm/s
+        // Get speed and distance using correct function names
+        float avg_speed = get_average_speed_cmps();  // cm/s
+        float avg_dist = get_average_distance_cm();  // cm
 
         // Update telemetry cache
         g_telem.line_pos = line_pos;

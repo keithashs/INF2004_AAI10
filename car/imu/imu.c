@@ -17,6 +17,13 @@ static bool  cal_active = false;              // single flag governs RAW capture
 static float raw_min_x, raw_min_y, raw_min_z; // only RAW tracking kept
 static float raw_max_x, raw_max_y, raw_max_z;
 
+// ===== TELEMETRY CACHE (DEFINED HERE) =====
+volatile imu_state_t g_imu_last = {0};
+volatile float       g_heading_err_deg = 0.0f;
+volatile float       g_bias_cps        = 0.0f;
+volatile bool        g_imu_ok          = false;
+volatile float       g_head_weight     = 0.0f;
+
 // I2C helpers
 static int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
     uint8_t buf[2] = { reg, val };

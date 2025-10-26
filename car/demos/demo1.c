@@ -25,13 +25,6 @@ static volatile bool g_override_motion = false;
 static float initial_heading_deg = 0.0f;
 static int   run_speed_percent   = 20;
 
-// ---- Telemetry cache ----
-volatile imu_state_t g_imu_last = {0};
-volatile float       g_heading_err_deg = 0.0f;
-volatile float       g_bias_cps        = 0.0f;
-volatile bool        g_imu_ok          = false;
-volatile float       g_head_weight     = 0.0f;
-
 // ---- Heading supervisor (gate IMU influence) ----
 typedef struct {
     float last_heading_deg;
@@ -112,7 +105,7 @@ static bool control_cb(repeating_timer_t* t) {
         if (fabsf(err_deg) < 2.0f) err_deg = 0.0f;
 
         // --- stricter supervisor thresholds ---
-        bool tilt_ok = (fabsf(s.roll_deg) <= 10.0f) && (fabsf(s.pitch_deg) <= 10.0f);
+        bool tilt_ok = (fabsf(s.roll_deg) <= 20.0f) && (fabsf(s.pitch_deg) <= 25.0f);
 
         // 2) heading rate limit (deg/s)
         float rate_ok = true;
@@ -127,7 +120,7 @@ static bool control_cb(repeating_timer_t* t) {
             if (dt_s > 0.0005f) {
                 float d = wrap180(s.heading_deg_filt - HS.last_heading_deg);
                 float rate = fabsf(d) / dt_s; // deg/s
-                rate_ok = (rate <= 30.0f);
+                rate_ok = (rate <= 60.0f);
                 HS.last_heading_deg = s.heading_deg_filt;
                 HS.last_t = now;
             }
