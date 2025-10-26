@@ -58,3 +58,17 @@ void telemetry_set_mode(telemetry_mode_t mode);
 
 // Helper to print the legend (unchanged)
 void print_telemetry_legend(void);
+
+// ===== Additional helpers for demo2 (speed in cm/s, distance in cm) =====
+
+// Get wheel speeds in cm/s (converted from CPS)
+void get_speed_cmps(float* left_cmps, float* right_cmps);
+
+// Get distances in cm (converted from meters)
+void get_distance_cm(float* left_cm, float* right_cm);
+
+// Average speed in cm/s
+float get_average_speed_cmps(void);
+
+// Average distance in cm
+float get_average_distance_cm(void);
