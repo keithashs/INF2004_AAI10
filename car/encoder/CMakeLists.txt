@@ -2,7 +2,7 @@ add_library(encoder_lib encoder.c)
 
 target_include_directories(encoder_lib PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}           # encoder/
-    ${CMAKE_CURRENT_LIST_DIR}/..        # car_demo1/
+    ${CMAKE_CURRENT_LIST_DIR}/..
     ${CMAKE_CURRENT_LIST_DIR}/../main
 )
 

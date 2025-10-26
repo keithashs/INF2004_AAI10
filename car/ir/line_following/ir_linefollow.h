@@ -1,10 +1,11 @@
 #pragma once
 #include <stdbool.h>
 #include "pico/stdlib.h"
+#include "config.h"
 
 // ===== Pin Definitions (from your config) =====
-#define IR_LEFT_PIN   0    // GP0 - Left line sensor (digital)
-#define IR_RIGHT_PIN  27   // GP27 - Right line sensor (digital)
+#define IR_LEFT_PIN   IR_LEFT_DIGITAL_PIN    // Now uses config.h value
+#define IR_RIGHT_PIN  IR_RIGHT_DIGITAL_PIN   // Now uses config.h value
 
 // ===== Line Detection Logic =====
 // Set to 1 if sensor outputs LOW on black line

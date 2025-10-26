@@ -2,7 +2,7 @@ add_library(imu_lib imu.c)
 
 target_include_directories(imu_lib PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}           # imu/
-    ${CMAKE_CURRENT_LIST_DIR}/..        # car_demo1/
+    ${CMAKE_CURRENT_LIST_DIR}/..
     ${CMAKE_CURRENT_LIST_DIR}/../main
 )
 
