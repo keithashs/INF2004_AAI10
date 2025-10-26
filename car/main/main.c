@@ -323,7 +323,29 @@ static void do_boot_auto_cal(void) {
 
     // stop motors and settle (silent)
     motion_command(MOVE_STOP, 0);
-    printf("BOOT: auto calibration complete. Press START when ready.\n");
+    printf("BOOT: auto calibration complete.\n");
+}
+
+// Boot-time prompt: ask whether to run auto-calibration.
+// Returns true if user agrees (via 'y'/'Y' on USB serial, or pressing START).
+static bool prompt_boot_cal(void) {
+    printf("BOOT: run auto-calibration before START? [y/N]\n");
+    printf("Press START = yes, STOP = no, or type y/n. Auto-skip in 10s...\n");
+    absolute_time_t t0 = get_absolute_time();
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 10000000) {
+        // Non-blocking character read from stdio (USB serial)
+        int ch = getchar_timeout_us(0);
+        if (ch == 'y' || ch == 'Y') { printf(" -> yes\n"); return true; }
+        if (ch == 'n' || ch == 'N') { printf(" -> no\n");  return false; }
+
+        // Buttons as an alternative input method
+        if (btn_pressed(BTN_START)) { sleep_ms(100); if (btn_pressed(BTN_START)) { printf(" -> yes (START)\n"); return true; } }
+        if (btn_pressed(BTN_STOP))  { sleep_ms(100); if (btn_pressed(BTN_STOP))  { printf(" -> no (STOP)\n");  return false; } }
+
+        tight_loop_contents();
+    }
+    printf("-> timeout; skipping auto-calibration.\n");
+    return false; // default: do not auto-calibrate
 }
 
 int main() {
@@ -351,10 +373,16 @@ int main() {
     }
     
     // Boot auto calibration
-    printf("BOOT: waiting 10s before auto calibration...\n");
-    sleep_ms(10000);
-    do_boot_auto_cal();
+    // printf("BOOT: waiting 10s before auto calibration...\n");
+    // sleep_ms(10000);
+    // Boot auto calibration (optional)
+    if (prompt_boot_cal()) {
+        do_boot_auto_cal();
+    } else {
+        printf("BOOT: auto-calibration skipped.\n");
+}
 
+    printf("Press START when ready.\n");
     while (true) {
         if (!running) {
             if (btn_pressed(BTN_START)) {
