@@ -5,9 +5,11 @@
 #include <math.h>
 
 #include "config.h"
-#include "motor/motor.h"
-#include "imu/imu.h"
-#include "pid/pid.h"
+#include "motor.h"
+#include "imu.h"
+#include "pid.h"
+
+#include "wifi_connect.h"
 
 // Timers
 static repeating_timer_t control_timer_motor;   // 10 ms: motor PID & telemetry (in motor.c)
@@ -340,6 +342,14 @@ int main() {
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
+    // 1) Try Wi-Fi once with a 20s timeout. Do NOT block the rest if it fails.
+    bool wifi_ok = wifi_try_connect_once(20000);
+    if (wifi_ok) {
+        printf("[BOOT] Wi-Fi OK. IP: %s\n", wifi_ip_str());
+    } else {
+        printf("[BOOT] Wi-Fi not available. Sensors and motors will continue.\n");
+    }
+    
     // Boot auto calibration
     printf("BOOT: waiting 10s before auto calibration...\n");
     sleep_ms(10000);

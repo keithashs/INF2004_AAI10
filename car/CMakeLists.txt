@@ -35,6 +35,7 @@ target_link_libraries(${PROJECT_NAME}
     hardware_i2c
     hardware_adc
     hardware_timer
+    wifi_connect_lib    # only wifi connection library
 )
 
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
