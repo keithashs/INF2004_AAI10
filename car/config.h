@@ -77,3 +77,24 @@
 // How aggressively to change scale based on persistent encoder diff.
 // Effective step ~= ADAPT_GAIN * (diff/base_cps) clamped small each update.
 #define ADAPT_GAIN         0.08f   // start small; increase if learning is too slow
+
+// ====== Demo1 Configuration ======
+#define DEMO1_RUN_SPEED_PERCENT   20
+#define DEMO1_SOFTSTART_SEC       0.6f
+#define DEMO1_SETTLE_TIME_MS      4000   // 4s settle before capturing heading
+
+// Calibration timing
+#define CAL_MAG_SPIN_DURATION_MS  3000   // 3s magnetometer calibration spin
+#define CAL_WHEEL_DRIVE_DURATION_MS 4000 // 4s wheel scale calibration drive
+#define CAL_WHEEL_SETTLE_MS       500    // 500ms settle before measurement
+
+// Control loop bias limits (as fraction of base speed)
+#define BIAS_TRACK_FRACTION  0.55f   // track PID can use 55% of base speed
+#define BIAS_HEAD_FRACTION   0.35f   // heading PID can use 35% of base speed
+#define BIAS_TOTAL_FRACTION  0.60f   // combined bias max 60% of base speed
+#define BIAS_MIN_CPS         5.0f    // minimum absolute bias limit (cps)
+#define BIAS_MIN_HEAD_CPS    3.0f    // minimum heading bias limit (cps)
+#define BIAS_MIN_TOTAL_CPS   6.0f    // minimum total bias limit (cps)
+
+// Button debounce
+#define BTN_DEBOUNCE_MS      100
