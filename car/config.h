@@ -76,7 +76,7 @@
 #define ADAPT_PERIOD_S     0.50f   // update scales every ~0.5 s
 // How aggressively to change scale based on persistent encoder diff.
 // Effective step ~= ADAPT_GAIN * (diff/base_cps) clamped small each update.
-#define ADAPT_GAIN         0.08f   // start small; increase if learning is too slow
+#define ADAPT_GAIN         0.15f   // start small; increase if learning is too slow
 
 // ====== Demo1 Configuration ======
 #define DEMO1_RUN_SPEED_PERCENT   20
