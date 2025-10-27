@@ -13,10 +13,11 @@
 #define ENCODER_PIN_M2  6    // GP6  : IR encoder for left motor
 
 //IR Line Sensor (Left IR Sensor) no analog input
-#define IR_LEFT_DIGITAL_PIN    0    // GP0 is digital input (sensor D0)
+#define IR_LEFT_DIGITAL_PIN    7    // GP7 is digital input (sensor D0)
+#define IR_LEFT_ADC_PIN       28    // GP28 is ADC0 (sensor A0)
 //IR Barcode Sensor (Right IR Sensor)
-#define IR_RIGHT_DIGITAL_PIN    27    // GP27 is is digital input
-#define IR_RIGHT_ADC_GPIO        26    // GP26 is ADC0 (sensor A0)
+#define IR_RIGHT_DIGITAL_PIN   27    // GP27 is digital input (sensor D0)
+#define IR_RIGHT_ADC_PIN       26    // GP26 is ADC0 (sensor A0)
 
 // Buttons
 #define BTN_START       21   // GP21 (START)
