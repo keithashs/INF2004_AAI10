@@ -28,12 +28,6 @@ static inline bool btn_pressed(uint gpio) {
     return gpio_get(gpio) == 0;
 }
 
-static inline float clampf(float x, float lo, float hi) {
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
-}
-
 static void buttons_init(void) {
     gpio_init(BTN_START); 
     gpio_set_dir(BTN_START, GPIO_IN); 

@@ -1,5 +1,5 @@
-// demo2.c - Line Following + Barcode Navigation + IMU Turns + Telemetry
-// Purpose: Full perception-decision-action loop for Demo 2
+// demo2.c - Line Following + Barcode Navigation + IMU Heading Correction
+// Purpose: Full perception-decision-action loop for Demo 2 using existing libraries
 
 #include <stdio.h>
 #include <math.h>
@@ -33,18 +33,16 @@
 // ============================================================================
 // LINE FOLLOWING PID GAINS (for thin 1.7cm line)
 // ============================================================================
-// Strategy: LEFT sensor is PRIMARY (must stay on black)
-//           RIGHT sensor validates we haven't drifted too far
-#define LINE_KP                0.60f    // Increased for faster response
-#define LINE_KI                0.08f    // Moderate integral for steady-state
-#define LINE_KD                0.08f    // Damping to prevent oscillation
-#define LINE_BIAS_MAX_CPS      10.0f    // Max steering correction (cps)
+#define LINE_KP                0.60f
+#define LINE_KI                0.08f
+#define LINE_KD                0.08f
+#define LINE_BIAS_MAX_CPS      10.0f
 
-// IMU heading correction gains (additional layer)
-#define IMU_HEADING_KP         0.25f    // Gentle heading correction
-#define IMU_HEADING_KI         0.02f    // Very slow integral
-#define IMU_HEADING_KD         0.00f    // No derivative on heading
-#define IMU_BIAS_MAX_CPS       6.0f     // Max IMU steering correction
+// IMU heading correction gains
+#define IMU_HEADING_KP         0.25f
+#define IMU_HEADING_KI         0.02f
+#define IMU_HEADING_KD         0.00f
+#define IMU_BIAS_MAX_CPS       6.0f
 
 // Line loss detection
 #define LINE_LOST_COUNT_MAX    50       // 0.5s of both sensors off = lost
@@ -69,10 +67,10 @@ static robot_state_t g_state = STATE_IDLE;
 static barcode_cmd_t g_pending_command = BARCODE_NONE;
 static float g_target_heading_deg = 0.0f;
 static float g_turn_start_heading_deg = 0.0f;
-static float g_initial_heading_deg = 0.0f;  // Captured on START
+static float g_initial_heading_deg = 0.0f;
 
 // ============================================================================
-// TELEMETRY CACHE (for cleaner prints)
+// TELEMETRY CACHE
 // ============================================================================
 static struct {
     line_position_t line_pos;
@@ -89,16 +87,30 @@ static struct {
 } g_telem = {0};
 
 // ============================================================================
-// LINE FOLLOWING PID STATE
+// LINE FOLLOWING PID STATE (separate from motor PID)
 // ============================================================================
-static float g_line_integ = 0.0f;
-static float g_line_prev_err = 0.0f;
+static PID pid_line_follow = {
+    .kp = LINE_KP,
+    .ki = LINE_KI,
+    .kd = LINE_KD,
+    .integ = 0,
+    .prev_err = 0,
+    .out_min = -LINE_BIAS_MAX_CPS,
+    .out_max = LINE_BIAS_MAX_CPS
+};
 
 // ============================================================================
-// IMU HEADING PID STATE (for long-term drift correction)
+// IMU HEADING PID STATE (for demo2 long-term drift)
 // ============================================================================
-static float g_imu_integ = 0.0f;
-static float g_imu_prev_err = 0.0f;
+static PID pid_imu_heading = {
+    .kp = IMU_HEADING_KP,
+    .ki = IMU_HEADING_KI,
+    .kd = IMU_HEADING_KD,
+    .integ = 0,
+    .prev_err = 0,
+    .out_min = -IMU_BIAS_MAX_CPS,
+    .out_max = IMU_BIAS_MAX_CPS
+};
 
 // ============================================================================
 // LINE RECOVERY STATE
@@ -117,105 +129,61 @@ static inline float wrap180(float a) {
     return a;
 }
 
-// Clamp value between min and max
-static inline float clampf(float x, float lo, float hi) {
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
-}
 
 // ============================================================================
-// LINE FOLLOWING CONTROLLER (for thin 1.7cm line)
+// LINE FOLLOWING CONTROLLER (using library PID)
 // ============================================================================
-// Strategy:
-// - LEFT sensor MUST detect black (primary control)
-// - RIGHT sensor validates position (secondary)
-// - Returns steering bias in CPS (positive = steer right, negative = steer left)
-//
-// Error encoding for THIN LINE:
-//   LEFT=BLACK, RIGHT=OFF  → err = 0.0   (PERFECT - on line)
-//   LEFT=OFF,   RIGHT=OFF  → err = +1.5  (drifted LEFT - steer right aggressively)
-//   LEFT=BLACK, RIGHT=BLACK → err = -0.5  (drifted RIGHT - steer left gently)
-//   LEFT=OFF,   RIGHT=BLACK → err = +2.0  (way off - major correction needed)
-// ============================================================================
-static float line_follow_pid(bool left_black, bool right_black, float dt) {
+static float line_follow_pid_controller(bool left_black, bool right_black, float dt) {
     float err = 0.0f;
     
-    // **PRIMARY STRATEGY: LEFT sensor must be on black**
+    // Error encoding for THIN LINE (LEFT sensor is PRIMARY)
     if (left_black && !right_black) {
-        // IDEAL CASE: Left on line, right off line
-        err = 0.0f;  // Perfect tracking
+        err = 0.0f;  // PERFECT
     } 
     else if (!left_black && !right_black) {
-        // BOTH OFF: Drifted left off the line
-        err = +1.5f;  // Steer RIGHT strongly
+        err = +1.5f;  // Drifted LEFT - steer RIGHT
     }
     else if (left_black && right_black) {
-        // BOTH ON: Drifted right (line is under both sensors)
-        err = -0.5f;  // Steer LEFT gently to center on left sensor
+        err = -0.5f;  // Drifted RIGHT - steer LEFT gently
     }
     else if (!left_black && right_black) {
-        // LEFT OFF, RIGHT ON: Significantly drifted left
-        err = +2.0f;  // Steer RIGHT very strongly
+        err = +2.0f;  // Way off - major correction
     }
 
-    // PID calculation
-    g_line_integ += err * dt;
-    g_line_integ = clampf(g_line_integ, -10.0f, 10.0f);  // Anti-windup
+    // Use library PID function
+    float bias = pid_step(&pid_line_follow, 0.0f, -err, dt);
+    g_telem.line_bias_cps = bias;
     
-    float deriv = (err - g_line_prev_err) / dt;
-    g_line_prev_err = err;
-
-    float bias = LINE_KP * err + LINE_KI * g_line_integ + LINE_KD * deriv;
-    
-    // Store for telemetry
-    g_telem.line_bias_cps = clampf(bias, -LINE_BIAS_MAX_CPS, LINE_BIAS_MAX_CPS);
-    
-    return g_telem.line_bias_cps;
+    return bias;
 }
 
 // ============================================================================
-// IMU HEADING CORRECTION (slow drift compensation)
+// IMU HEADING CORRECTION (using library)
 // ============================================================================
-// Provides gentle long-term heading correction to complement encoder-based
-// line following. Only active when IMU data is valid.
-// ============================================================================
-static float imu_heading_pid(float current_heading, float dt) {
+static float imu_heading_correction(float current_heading, float dt) {
     imu_state_t imu;
     if (!imu_read(&imu) || !imu.ok) {
-        // IMU not available - no correction
         g_telem.imu_bias_cps = 0.0f;
         return 0.0f;
     }
 
-    // Calculate heading error relative to initial heading
     float err_deg = wrap180(current_heading - g_initial_heading_deg);
     g_telem.heading_error_deg = err_deg;
     
-    // Deadband to avoid micro-corrections
+    // Deadband
     if (fabsf(err_deg) < 2.0f) {
         err_deg = 0.0f;
     }
 
-    // PID calculation
-    g_imu_integ += err_deg * dt;
-    g_imu_integ = clampf(g_imu_integ, -20.0f, 20.0f);  // Anti-windup
+    // Use library PID function
+    float bias = pid_step(&pid_imu_heading, 0.0f, -err_deg, dt);
+    g_telem.imu_bias_cps = bias;
     
-    float deriv = (err_deg - g_imu_prev_err) / dt;
-    g_imu_prev_err = err_deg;
-
-    float bias = IMU_HEADING_KP * err_deg + IMU_HEADING_KI * g_imu_integ + IMU_HEADING_KD * deriv;
-    
-    // Store for telemetry
-    g_telem.imu_bias_cps = clampf(bias, -IMU_BIAS_MAX_CPS, IMU_BIAS_MAX_CPS);
-    
-    return g_telem.imu_bias_cps;
+    return bias;
 }
 
 // ============================================================================
-// TURN EXECUTION (IMU-based accurate turning)
-// ============================================================================
-// Returns true when turn is complete
+// TURN EXECUTION (using motor library)
 // ============================================================================
 static bool execute_turn(float current_heading, float dt) {
     static float last_hdg = 0.0f;
@@ -227,27 +195,25 @@ static bool execute_turn(float current_heading, float dt) {
     if (fabsf(delta) < TURN_TOLERANCE_DEG) {
         motion_command(MOVE_STOP, 0);
         stall_count = 0;
-        return true;  // Turn complete
+        return true;
     }
 
-    // Proportional turn rate (smoother than bang-bang)
+    // Proportional turn rate
     float turn_rate_cps = clampf(delta * 0.6f, -18.0f, 18.0f);
     
-    // Differential drive: positive delta = turn right
+    // Use motor library differential drive
     if (delta > 0) {
-        // Turn right: left wheel forward faster, right wheel slower
         motion_command_with_bias(MOVE_FORWARD, TURN_SPEED_PCT, 
                                 -turn_rate_cps, turn_rate_cps);
     } else {
-        // Turn left: right wheel forward faster, left wheel slower
         motion_command_with_bias(MOVE_FORWARD, TURN_SPEED_PCT, 
                                 turn_rate_cps, -turn_rate_cps);
     }
 
-    // Stall detection (not moving for 1 second)
+    // Stall detection
     if (fabsf(current_heading - last_hdg) < 0.5f) {
         stall_count++;
-        if (stall_count > 100) {  // 1 second at 100 Hz
+        if (stall_count > 100) {
             printf("[DEMO2] Turn stalled at %.1f deg, forcing completion\n", 
                    (double)current_heading);
             stall_count = 0;
@@ -258,16 +224,13 @@ static bool execute_turn(float current_heading, float dt) {
     }
     last_hdg = current_heading;
 
-    return false;  // Turn in progress
+    return false;
 }
 
 // ============================================================================
 // LINE RECOVERY LOGIC
 // ============================================================================
-// Attempts to recover when both sensors lose the line
-// ============================================================================
 static void attempt_line_recovery(void) {
-    // Simple strategy: slow reverse for 300ms, then check
     static bool reversing = false;
     
     if (!reversing) {
@@ -277,14 +240,13 @@ static void attempt_line_recovery(void) {
         reversing = true;
     }
     
-    // Check if we've been reversing for 300ms
     if (absolute_time_diff_us(g_recovery_start_time, get_absolute_time()) > 300000) {
         motion_command(MOVE_STOP, 0);
         reversing = false;
         
         // Check if line reacquired
-        line_position_t pos = ir_get_line_position();
         bool left_black = ir_left_is_black();
+        line_position_t pos = ir_get_line_position();
         
         if (left_black || pos != LINE_BOTH_OFF) {
             g_state = STATE_LINE_FOLLOW;
@@ -298,7 +260,7 @@ static void attempt_line_recovery(void) {
 }
 
 // ============================================================================
-// TELEMETRY PRINT (5 Hz for readability)
+// TELEMETRY PRINT (5 Hz)
 // ============================================================================
 static void print_telemetry(void) {
     printf("[DEMO2] State=%d Sensors[L=%d R=%d] LineErr=%.2f IMU_Err=%.1f° "
@@ -306,7 +268,7 @@ static void print_telemetry(void) {
            g_telem.state,
            g_telem.left_sensor_black,
            g_telem.right_sensor_black,
-           (double)g_line_prev_err,
+           (double)pid_line_follow.prev_err,
            (double)g_telem.heading_error_deg,
            (double)g_telem.speed_cmps,
            (double)g_telem.distance_cm,
@@ -315,7 +277,7 @@ static void print_telemetry(void) {
 }
 
 // ============================================================================
-// TELEMETRY LEGEND (printed once at start)
+// TELEMETRY LEGEND
 // ============================================================================
 static void print_legend(void) {
     printf("\n=== DEMO 2 TELEMETRY LEGEND ===\n");
@@ -329,18 +291,17 @@ static void print_legend(void) {
 }
 
 // ============================================================================
-// MAIN FUNCTION
+// SYSTEM INITIALIZATION
 // ============================================================================
-int main(void) {
-    // ========== INITIALIZATION ==========
+static void system_init(void) {
     stdio_init_all();
     sleep_ms(10000);
     printf("\n╔════════════════════════════════════════════════════════════╗\n");
-    printf("║   DEMO 2: Line Following + Barcode + IMU                  ║\n");
-    printf("║   Optimized for THIN LINE (1.7cm) - Left Sensor Primary  ║\n");
+    printf("║   DEMO 2: Line Following + Barcode + IMU (Refactored)     ║\n");
+    printf("║   Optimized for THIN LINE (1.7cm) - Left Sensor Primary   ║\n");
     printf("╚════════════════════════════════════════════════════════════╝\n\n");
 
-    // Initialize all subsystems
+    // Initialize subsystems using libraries
     if (!imu_init()) {
         printf("[ERROR] IMU init FAILED - check I2C wiring (GP2=SDA, GP3=SCL)\n");
         while (1) sleep_ms(1000);
@@ -357,21 +318,24 @@ int main(void) {
     barcode_init();
     printf("[OK] Barcode scanner initialized (GP%d)\n", IR_RIGHT_ADC_PIN);
 
-    pid_init_defaults();
-    printf("[OK] PID controllers initialized\n");
+    // Initialize demo2-specific PIDs (separate from motor PIDs)
+    pid_reset(&pid_line_follow);
+    pid_reset(&pid_imu_heading);
+    printf("[OK] Demo2 PID controllers initialized\n");
 
-    // Start motor control timer (100 Hz)
+    // Start motor control timer (uses library function)
     static repeating_timer_t motor_control_timer;
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &motor_control_timer);
     printf("[OK] Motor control timer started (100 Hz)\n");
 
-    // Capture initial heading after IMU settles
+    // Capture initial heading
     printf("[INIT] Capturing initial heading...\n");
     sleep_ms(1000);
     imu_state_t imu;
     if (imu_read(&imu) && imu.ok) {
         g_initial_heading_deg = imu.heading_deg_filt;
         g_target_heading_deg = g_initial_heading_deg;
+        imu_reset_heading_filter(g_initial_heading_deg);
         printf("[OK] Initial heading: %.1f°\n", (double)g_initial_heading_deg);
     } else {
         printf("[WARN] IMU not ready, using 0.0° as initial heading\n");
@@ -380,8 +344,15 @@ int main(void) {
     }
 
     print_legend();
+}
 
-    // ========== WAIT FOR START ==========
+// ============================================================================
+// MAIN FUNCTION
+// ============================================================================
+int main(void) {
+    system_init();
+
+    // Wait for START button
     printf("═══════════════════════════════════════════════════════════\n");
     printf("  Press START (GP21) to begin line following...\n");
     printf("═══════════════════════════════════════════════════════════\n\n");
@@ -400,7 +371,7 @@ int main(void) {
 
     // ========== MAIN CONTROL LOOP (100 Hz) ==========
     while (true) {
-        // ===== 1) READ ALL SENSORS =====
+        // ===== 1) READ ALL SENSORS (using libraries) =====
         bool left_black = ir_left_is_black();
         bool right_black = ir_right_is_black();
         line_position_t line_pos = ir_get_line_position();
@@ -427,7 +398,7 @@ int main(void) {
         // ===== 2) STATE MACHINE =====
         switch (g_state) {
             case STATE_LINE_FOLLOW: {
-                // ---- Check for barcode first ----
+                // Check for barcode
                 if (barcode_detected && barcode_res.command != BARCODE_NONE) {
                     g_pending_command = barcode_res.command;
                     g_telem.last_barcode = barcode_res.command;
@@ -437,7 +408,7 @@ int main(void) {
                     break;
                 }
 
-                // ---- Check for line loss ----
+                // Check for line loss
                 if (!left_black && !right_black) {
                     g_line_lost_count++;
                     if (g_line_lost_count > LINE_LOST_COUNT_MAX) {
@@ -447,26 +418,24 @@ int main(void) {
                         break;
                     }
                 } else {
-                    g_line_lost_count = 0;  // Reset when line found
+                    g_line_lost_count = 0;
                 }
 
-                // ---- Normal line following with combined PID ----
-                float line_bias = line_follow_pid(left_black, right_black, DT_S);
-                float imu_bias = imu_heading_pid(current_heading, DT_S);
+                // Normal line following with combined PID (using libraries)
+                float line_bias = line_follow_pid_controller(left_black, right_black, DT_S);
+                float imu_bias = imu_heading_correction(current_heading, DT_S);
                 
-                // Combine both corrections (line following is primary, IMU is secondary)
-                float total_bias = line_bias + (imu_bias * 0.3f);  // Scale IMU contribution
+                // Combine corrections (line following is primary)
+                float total_bias = line_bias + (imu_bias * 0.3f);
                 total_bias = clampf(total_bias, -LINE_BIAS_MAX_CPS, LINE_BIAS_MAX_CPS);
                 
-                // Apply differential drive with bias
-                // Positive bias = steer right (left wheel faster, right wheel slower)
+                // Apply differential drive using motor library
                 motion_command_with_bias(MOVE_FORWARD, LINE_FOLLOW_SPEED_PCT, 
                                         total_bias, -total_bias);
                 break;
             }
 
             case STATE_BARCODE_DETECTED: {
-                // Execute barcode command
                 switch (g_pending_command) {
                     case BARCODE_LEFT:
                         g_turn_start_heading_deg = current_heading;
@@ -513,16 +482,14 @@ int main(void) {
                     printf("[TURN] Turn complete (final heading: %.1f°)\n", 
                            (double)current_heading);
                     motion_command(MOVE_STOP, 0);
-                    sleep_ms(300);  // Brief pause to settle
+                    sleep_ms(300);
                     
-                    // Update reference heading for line following
+                    // Update reference heading
                     g_initial_heading_deg = g_target_heading_deg;
                     
-                    // Reset line PID integrators
-                    g_line_integ = 0.0f;
-                    g_line_prev_err = 0.0f;
-                    g_imu_integ = 0.0f;
-                    g_imu_prev_err = 0.0f;
+                    // Reset PIDs using library function
+                    pid_reset(&pid_line_follow);
+                    pid_reset(&pid_imu_heading);
                     
                     g_state = STATE_LINE_FOLLOW;
                     printf("[RESUME] Resuming line follow mode\n");
@@ -533,15 +500,12 @@ int main(void) {
             case STATE_STOPPED: {
                 motion_command(MOVE_STOP, 0);
                 
-                // **IMPROVED: Check for START button to resume (not infinite loop)**
+                // Check for START button to resume
                 if (gpio_get(BTN_START) == 0) {
-                    sleep_ms(200);  // Debounce
+                    sleep_ms(200);
                     
-                    // Reset PIDs
-                    g_line_integ = 0.0f;
-                    g_line_prev_err = 0.0f;
-                    g_imu_integ = 0.0f;
-                    g_imu_prev_err = 0.0f;
+                    pid_reset(&pid_line_follow);
+                    pid_reset(&pid_imu_heading);
                     
                     g_state = STATE_LINE_FOLLOW;
                     printf("[RESTART] Resuming from STOP state\n");
@@ -559,17 +523,17 @@ int main(void) {
                 break;
         }
 
-        // ===== 3) TELEMETRY OUTPUT (5 Hz for readability) =====
+        // ===== 3) TELEMETRY OUTPUT (5 Hz) =====
         if ((telem_div++ % (1000 / LOOP_DT_MS / 5)) == 0) {
             print_telemetry();
         }
 
-        // ===== 4) EMERGENCY STOP (STOP button = halt, not restart) =====
+        // ===== 4) EMERGENCY STOP =====
         if (gpio_get(BTN_STOP) == 0) {
             motion_command(MOVE_STOP, 0);
             g_state = STATE_STOPPED;
             printf("\n[EMERGENCY] STOP button pressed - press START to resume\n");
-            sleep_ms(500);  // Debounce
+            sleep_ms(500);
         }
 
         // ===== 5) LOOP TIMING (maintain 100 Hz) =====
@@ -579,5 +543,3 @@ int main(void) {
 
     return 0;
 }
-
-
