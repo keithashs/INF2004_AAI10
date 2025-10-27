@@ -355,7 +355,7 @@ int main(void) {
            IR_LEFT_DIGITAL_PIN, IR_RIGHT_DIGITAL_PIN);
 
     barcode_init();
-    printf("[OK] Barcode scanner initialized (GP%d)\n", IR_RIGHT_ADC_GPIO);
+    printf("[OK] Barcode scanner initialized (GP%d)\n", IR_RIGHT_ADC_PIN);
 
     pid_init_defaults();
     printf("[OK] PID controllers initialized\n");

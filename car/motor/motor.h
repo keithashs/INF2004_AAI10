@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 #include "config.h"
 #include "pico/time.h"
 
@@ -26,6 +27,15 @@ void motion_command_with_bias(move_t move, int speed_percent, float left_bias_cp
 // Per-wheel target scaling to cancel systematic drift
 void motor_set_wheel_scale(float scale_right, float scale_left);
 void motor_get_wheel_scale(float* scale_right, float* scale_left);
+
+// NEW: Calibrate wheel scale from measured CPS ratio
+void motor_calibrate_wheel_scale(float r_avg, float l_avg);
+
+// NEW: Adaptive wheel scaling update (call in control loop)
+void motor_update_adaptive_scale(float diff_meas, float dt, float base_cps);
+
+// NEW: Reset adaptive scaling state
+void motor_reset_adaptive_scale(void);
 
 // Control loop timer callback (10ms)
 bool motor_control_timer_cb(repeating_timer_t *t);
@@ -56,7 +66,7 @@ typedef enum {
 // Set the current telemetry mode
 void telemetry_set_mode(telemetry_mode_t mode);
 
-// Helper to print the legend (unchanged)
+// Helper to print the legend
 void print_telemetry_legend(void);
 
 // ===== Additional helpers for demo2 (speed in cm/s, distance in cm) =====
@@ -72,3 +82,10 @@ float get_average_speed_cmps(void);
 
 // Average distance in cm
 float get_average_distance_cm(void);
+
+// Utility function: clamp float
+static inline float clampf(float x, float lo, float hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
