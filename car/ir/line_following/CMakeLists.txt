@@ -11,4 +11,6 @@ target_include_directories(ir_lib PUBLIC
 target_link_libraries(ir_lib
     pico_stdlib
     hardware_gpio
+    hardware_adc
+    hardware_timer
 )

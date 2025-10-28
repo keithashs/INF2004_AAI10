@@ -1,64 +1,67 @@
 #include "ir_linefollow.h"
+#include "hardware/adc.h"
+#include <stdio.h>
 
-// ===== Helper: Check if raw reading indicates black =====
-static inline bool is_black(int raw) {
-    return IR_BLACK_IS_LOW ? (raw == 0) : (raw == 1);
-}
-
-// ===== Initialize GPIO pins =====
+// ===== Initialize ADC for line sensor =====
 void ir_line_init(void) {
-    gpio_init(IR_LEFT_PIN);
-    gpio_set_dir(IR_LEFT_PIN, GPIO_IN);
-    // Adjust pull resistor based on your sensor:
-    // gpio_pull_up(IR_LEFT_PIN);   // if sensor is open-collector
-    // gpio_disable_pulls(IR_LEFT_PIN); // if sensor has internal pull-up
-
-    gpio_init(IR_RIGHT_PIN);
-    gpio_set_dir(IR_RIGHT_PIN, GPIO_IN);
-    // gpio_pull_up(IR_RIGHT_PIN);
+    adc_init();
+    adc_gpio_init(IR_LEFT_ADC);
+    printf("[LINE] Initialized on GP%d (ADC2)\n", IR_LEFT_ADC);
 }
 
-// ===== Raw Reads =====
-int ir_read_left_raw(void) {
-    return gpio_get(IR_LEFT_PIN);
+// ===== Read raw ADC value =====
+uint16_t ir_read_left_adc(void) {
+    adc_select_input(2);  // ADC2 = GP28
+    return adc_read();
 }
 
-int ir_read_right_raw(void) {
-    return gpio_get(IR_RIGHT_PIN);
-}
-
-// ===== Black Detection =====
+// ===== Binary black detection =====
 bool ir_left_is_black(void) {
-    return is_black(ir_read_left_raw());
+    return (ir_read_left_adc() > IR_BLACK_THRESHOLD);
 }
 
-bool ir_right_is_black(void) {
-    return is_black(ir_read_right_raw());
-}
-
-// ===== High-Level Line Position =====
-line_position_t ir_get_line_position(void) {
-    bool left_black = ir_left_is_black();
-    bool right_black = ir_right_is_black();
-
-    if (left_black && right_black) {
-        return LINE_CENTER;      // Both on line → centered
-    } else if (left_black && !right_black) {
-        return LINE_LEFT;        // Left on, right off → drifted right, steer left
-    } else if (!left_black && right_black) {
-        return LINE_RIGHT;       // Right on, left off → drifted left, steer right
-    } else {
-        return LINE_BOTH_OFF;    // Both off → lost or at junction
+// ===== Get line following error with analog positioning =====
+line_reading_t ir_get_line_error(void) {
+    line_reading_t reading;
+    reading.raw_adc = ir_read_left_adc();
+    
+    // Detect if line is present
+    reading.line_detected = (reading.raw_adc > IR_BLACK_THRESHOLD);
+    
+    if (!reading.line_detected) {
+        // Line lost - major correction needed
+        reading.error = +2.5f;  // Assume drifted left, turn right aggressively
+        return reading;
     }
+    
+    // ===== Analog positioning within black line =====
+    // Map ADC value to position error
+    // Higher ADC = more centered, Lower ADC = edge of line
+    
+    if (reading.raw_adc > 2800) {
+        // Well-centered on line
+        reading.error = 0.0f;
+    } else if (reading.raw_adc > 2400) {
+        // Slightly off-center (left edge)
+        reading.error = +0.5f;  // Gentle correction right
+    } else if (reading.raw_adc > 2000) {
+        // Near edge of line
+        reading.error = +1.2f;  // Moderate correction right
+    } else {
+        // Barely on line
+        reading.error = +2.0f;  // Strong correction right
+    }
+    
+    return reading;
 }
 
-// ===== String Conversion (for telemetry) =====
+// ===== String conversion for telemetry =====
 const char* ir_line_position_str(line_position_t pos) {
     switch (pos) {
         case LINE_CENTER:   return "CENTER";
         case LINE_LEFT:     return "LEFT";
         case LINE_RIGHT:    return "RIGHT";
-        case LINE_BOTH_OFF: return "BOTH_OFF";
+        case LINE_BOTH_OFF: return "LOST";
         case LINE_LOST:     return "LOST";
         default:            return "UNKNOWN";
     }
