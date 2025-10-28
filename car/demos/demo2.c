@@ -32,19 +32,19 @@
 // LINE FOLLOWING PID GAINS (optimized for 1.7cm thin line)
 // ============================================================================
 // These are SEPARATE from motor PID - this controls steering bias
-#define LINE_KP                0.85f    // Increased for tighter line tracking
-#define LINE_KI                0.12f    // Small integral to eliminate steady-state error
-#define LINE_KD                0.15f    // Derivative to dampen oscillations
-#define LINE_BIAS_MAX_CPS      15.0f    // Max steering correction (cps units)
+#define LINE_KP                1.20f    // Increased from 0.85f - more aggressive proportional
+#define LINE_KI                0.18f    // Increased from 0.12f - faster integral wind-up
+#define LINE_KD                0.25f    // Increased from 0.15f - better damping at higher speeds
+#define LINE_BIAS_MAX_CPS      18.0f    // Increased from 15.0f - allow stronger corrections
 
-// IMU heading correction gains (reuse from demo1)
+// IMU heading correction gains (keep gentler for stability)
 #define IMU_HEADING_KP         0.35f
 #define IMU_HEADING_KI         0.04f
 #define IMU_HEADING_KD         0.00f
-#define IMU_BIAS_MAX_CPS       8.0f
+#define IMU_BIAS_MAX_CPS       6.0f
 
 // Line loss recovery
-#define LINE_LOST_COUNT_MAX    150      // 1.5s of no line = lost (100Hz * 1.5s)
+#define LINE_LOST_COUNT_MAX    100      // 1.0s of no line = lost (100Hz * 1.0s)
 #define LINE_RECOVERY_TIMEOUT  200      // 2.0s max recovery attempt
 
 // Barcode detection safety

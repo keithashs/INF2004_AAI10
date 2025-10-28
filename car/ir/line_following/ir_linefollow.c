@@ -4,7 +4,7 @@
 #include <math.h>
 
 // ===== Low-pass filter for ADC readings =====
-#define ADC_FILTER_ALPHA 0.7f
+#define ADC_FILTER_ALPHA 0.85f // lower = more smoothing and responsive
 static float adc_filtered = 0.0f;
 static bool filter_initialized = false;
 
@@ -54,7 +54,7 @@ uint16_t ir_read_left_adc(void) {
 
 // ===== Binary black detection =====
 bool ir_left_is_black(void) {
-    return (ir_read_left_adc() > IR_BLACK_THRESHOLD);
+    return (ir_read_left_adc() >= IR_BLACK_THRESHOLD);
 }
 
 // ===== Get line following error with analog positioning =====
@@ -79,9 +79,9 @@ line_reading_t ir_get_line_error(void) {
     
     // Define ADC ranges for different positions
     // These values are tuned for your specific sensor and line
-    const uint16_t CENTERED_MIN = 2800;   // Very centered
-    const uint16_t GOOD_MIN = 2400;       // Slightly off-center
-    const uint16_t EDGE_MIN = 2100;       // Near edge
+    const uint16_t CENTERED_MIN = 2500;   // Very centered
+    const uint16_t GOOD_MIN = 2300;       // Slightly off-center
+    const uint16_t EDGE_MIN = 1200;       // Near edge
     // Below 2000 = barely on line
     
     if (reading.raw_adc >= CENTERED_MIN) {
