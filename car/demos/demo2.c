@@ -32,16 +32,16 @@
 // LINE FOLLOWING PID GAINS (optimized for 1.7cm thin line)
 // ============================================================================
 // These are SEPARATE from motor PID - this controls steering bias
-#define LINE_KP                1.20f    // Increased from 0.85f - more aggressive proportional
-#define LINE_KI                0.18f    // Increased from 0.12f - faster integral wind-up
-#define LINE_KD                0.25f    // Increased from 0.15f - better damping at higher speeds
-#define LINE_BIAS_MAX_CPS      18.0f    // Increased from 15.0f - allow stronger corrections
+#define LINE_KP                0.75f    // Reduced from 1.20f - gentler proportional response
+#define LINE_KI                0.08f    // Reduced from 0.18f - slower integral buildup
+#define LINE_KD                0.18f    // Reduced from 0.25f - less aggressive damping
+#define LINE_BIAS_MAX_CPS      15.0f    // Reduced from 18.0f - limit max correction
 
 // IMU heading correction gains (keep gentler for stability)
 #define IMU_HEADING_KP         0.35f
 #define IMU_HEADING_KI         0.04f
 #define IMU_HEADING_KD         0.00f
-#define IMU_BIAS_MAX_CPS       6.0f
+#define IMU_BIAS_MAX_CPS       5.0f
 
 // Line loss recovery
 #define LINE_LOST_COUNT_MAX    100      // 1.0s of no line = lost (100Hz * 1.0s)
@@ -134,9 +134,15 @@ static float line_follow_pid_controller(line_reading_t *reading, float dt) {
     // Use analog error from line sensor (positive = drifted left, need right correction)
     float err = reading->error;
     
-    // Apply line following PID
+    // Apply line following PID with reduced gains for smoother response
     // Note: We negate the error because positive error (drift left) needs negative bias (right turn)
     float bias = pid_step(&pid_line_follow, 0.0f, -err, dt);
+    
+    // Apply confidence-based scaling for uncertain readings
+    // When confidence is low, reduce correction strength to prevent overreaction
+    if (reading->confidence < 0.8f) {
+        bias *= (0.5f + 0.5f * reading->confidence);  // Scale down when uncertain
+    }
     
     // Store for telemetry
     g_telem.line_bias_cps = bias;
@@ -295,13 +301,6 @@ static bool attempt_line_recovery(line_reading_t *reading) {
 static bool main_control_cb(repeating_timer_t* t) {
     volatile bool* p_run = (volatile bool*)t->user_data;
     const float dt = DT_S;
-    
-    // Initialize run start time on first run
-    // static absolute_time_t run_t0;
-    // if (g_first_run && p_run && *p_run) {
-    //     run_t0 = get_absolute_time();
-    //     g_first_run = false;
-    // }
 
     // Stop motors if not running and not overridden
     if (!p_run || !*p_run) {
@@ -386,36 +385,52 @@ static bool main_control_cb(repeating_timer_t* t) {
             // (A) Line following PID (primary steering)
             float line_bias = line_follow_pid_controller(&line, dt);
             
-            // (B) IMU heading correction (slow drift prevention)
-            float imu_bias = imu_heading_correction(current_heading, dt);
+            // (B) IMU heading correction (slow drift prevention) only when line confident
+            float imu_bias = 0.0f;
+            if (line.confidence > 0.7f) {  // Only apply IMU when line tracking is good
+                imu_bias = imu_heading_correction(current_heading, dt);
+            }
             
             // (C) Encoder balance PID (from demo1 architecture)
             float diff_meas = cps_r - cps_l;
             float encoder_bias = pid_step(&pid_track, 0.0f, -diff_meas, dt);
             
-            // Apply limits to each bias component
-            float lim_line = fmaxf(BIAS_MIN_CPS, BIAS_TRACK_FRACTION * base_cps);
-            float lim_imu = fmaxf(BIAS_MIN_HEAD_CPS, BIAS_HEAD_FRACTION * base_cps);
-            float lim_enc = fmaxf(BIAS_MIN_CPS, 0.45f * base_cps);
+            // Limits scale with speed and line confidence
+            float confidence_factor = (line.confidence + 1.0f) / 2.0f;  // 0.5 to 1.0
+            
+            float lim_line = fmaxf(BIAS_MIN_CPS, 0.50f * base_cps * confidence_factor);
+            float lim_imu = fmaxf(BIAS_MIN_HEAD_CPS, 0.25f * base_cps);  // Reduced IMU influence
+            float lim_enc = fmaxf(BIAS_MIN_CPS, 0.35f * base_cps);
             
             line_bias = clampf(line_bias, -lim_line, lim_line);
             imu_bias = clampf(imu_bias, -lim_imu, lim_imu);
             encoder_bias = clampf(encoder_bias, -lim_enc, lim_enc);
             
-            // Combine biases with weighting
-            // Priority: Line > Encoder > IMU
-            float total_bias = line_bias * 0.60f +        // Line following dominant
-                              encoder_bias * 0.25f +       // Encoder balance secondary
-                              imu_bias * 0.15f;            // IMU trim tertiary
+            // When line confidence is high, trust line sensor more
+            // When line confidence is low, rely more on encoders
+            float w_line = 0.65f * confidence_factor;     // 0.325 to 0.65
+            float w_enc = 0.30f * (2.0f - confidence_factor);  // 0.15 to 0.30
+            float w_imu = 0.05f;                          // Minimal IMU influence
             
-            // Final safety clamp
-            float lim_total = fmaxf(BIAS_MIN_TOTAL_CPS, BIAS_TOTAL_FRACTION * base_cps);
+            // Normalize weights
+            float w_total = w_line + w_enc + w_imu;
+            w_line /= w_total;
+            w_enc /= w_total;
+            w_imu /= w_total;
+            
+            float total_bias = line_bias * w_line +
+                              encoder_bias * w_enc +
+                              imu_bias * w_imu;
+            
+            // Final safety clamp with reduced limit
+            float lim_total = fmaxf(BIAS_MIN_TOTAL_CPS, 0.50f * base_cps);  // Reduced from 0.60
             total_bias = clampf(total_bias, -lim_total, lim_total);
             
             // Update adaptive wheel scaling (from demo1)
             motor_update_adaptive_scale(diff_meas, dt, base_cps);
             
-            // Command motion: positive bias = left faster, right slower
+            // Command motion with smoother bias application
+            // Apply total bias symmetrically: positive = left faster, right slower
             motion_command_with_bias(MOVE_FORWARD, LINE_FOLLOW_SPEED_PCT,
                                     total_bias,   // Left wheel adjustment
                                     -total_bias); // Right wheel adjustment (opposite)

@@ -37,3 +37,6 @@ line_reading_t ir_get_line_error(void);
 
 // Reset internal state (useful after turns or line loss recovery)
 void ir_line_reset_state(void);
+
+// Run calibration procedure to determine ADC thresholds
+void ir_line_calibrate(void);
