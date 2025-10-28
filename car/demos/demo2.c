@@ -18,7 +18,7 @@
 // CONFIGURATION PARAMETERS
 // ============================================================================
 
-#define LINE_FOLLOW_SPEED_PCT  20       // Base speed (matches demo1 20%)
+#define LINE_FOLLOW_SPEED_PCT  15       // Base speed (matches demo1 20%)
 #define TURN_SPEED_PCT         18       // Speed during turns (slightly lower)
 #define TURN_ANGLE_90          90.0f    // LEFT/RIGHT turn angle
 #define TURN_ANGLE_180         180.0f   // U-TURN angle
@@ -32,20 +32,20 @@
 // LINE FOLLOWING PID GAINS (optimized for 1.7cm thin line)
 // ============================================================================
 // These are SEPARATE from motor PID - this controls steering bias
-#define LINE_KP                0.75f    // Reduced from 1.20f - gentler proportional response
-#define LINE_KI                0.08f    // Reduced from 0.18f - slower integral buildup
-#define LINE_KD                0.18f    // Reduced from 0.25f - less aggressive damping
-#define LINE_BIAS_MAX_CPS      15.0f    // Reduced from 18.0f - limit max correction
+#define LINE_KP                0.70f    //gentler proportional response
+#define LINE_KI                0.55f    // Reduced from 0.18f - slower integral buildup
+#define LINE_KD                0.05f    // Reduced from 0.25f - less aggressive damping
+#define LINE_BIAS_MAX_CPS      18.0f    // Reduced from 18.0f - limit max correction
 
 // IMU heading correction gains (keep gentler for stability)
-#define IMU_HEADING_KP         0.35f
-#define IMU_HEADING_KI         0.04f
+#define IMU_HEADING_KP         0.40f
+#define IMU_HEADING_KI         0.05f
 #define IMU_HEADING_KD         0.00f
 #define IMU_BIAS_MAX_CPS       5.0f
 
 // Line loss recovery
-#define LINE_LOST_COUNT_MAX    100      // 1.0s of no line = lost (100Hz * 1.0s)
-#define LINE_RECOVERY_TIMEOUT  200      // 2.0s max recovery attempt
+#define LINE_LOST_COUNT_MAX    50      // 0.2s of no line = lost (100Hz * 0.2s)
+#define LINE_RECOVERY_TIMEOUT  500      // 5.0s max recovery attempt
 
 // Barcode detection safety
 #define BARCODE_MIN_INTERVAL_MS  3000   // 3 seconds between barcode actions

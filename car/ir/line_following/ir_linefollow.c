@@ -4,7 +4,7 @@
 #include <math.h>
 
 // ===== Low-pass filter for ADC readings =====
-#define ADC_FILTER_ALPHA 0.75f // Reduced for faster response to drift
+#define ADC_FILTER_ALPHA 0.85f // Reduced for faster response to drift
 static float adc_filtered = 0.0f;
 static bool filter_initialized = false;
 
@@ -15,10 +15,10 @@ static int history_index = 0;
 
 // ===== Calibration values (CRITICAL: measure these on your track!) =====
 // Run calibration mode to determine these values
-static uint16_t cal_centered_adc = 2800;  // ADC when perfectly centered on line
-static uint16_t cal_good_adc = 2300;      // ADC when slightly off-center
-static uint16_t cal_edge_adc = 1800;      // ADC when at edge of line (still seeing black)
-static uint16_t cal_barely_on_adc = 1200; // ADC when barely touching line
+static uint16_t cal_centered_adc = 1800;  // ADC when perfectly centered on line
+static uint16_t cal_good_adc = 1650;      // ADC when slightly off-center
+static uint16_t cal_edge_adc = 1200;      // ADC when at edge of line (still seeing black)
+static uint16_t cal_barely_on_adc = 800; // ADC when barely touching line
 
 // ===== Initialize ADC for line sensor =====
 void ir_line_init(void) {
@@ -82,7 +82,7 @@ line_reading_t ir_get_line_error(void) {
         return reading;
     }
     
-    // ===== IMPROVED: Smoother analog positioning with non-linear mapping =====
+    // ===== Smoother analog positioning with non-linear mapping =====
     // Map ADC intensity to position error using calibrated thresholds
     
     if (reading.raw_adc >= cal_centered_adc) {
@@ -125,73 +125,6 @@ line_reading_t ir_get_line_error(void) {
     }
     
     return reading;
-}
-
-// ===== NEW: Calibration helper function =====
-void ir_line_calibrate(void) {
-    printf("\n╔════════════════════════════════════════════════╗\n");
-    printf("║   LINE SENSOR CALIBRATION PROCEDURE           ║\n");
-    printf("╚════════════════════════════════════════════════╝\n\n");
-    
-    printf("This will help you determine the correct ADC thresholds.\n");
-    printf("Place the car in each position and press a key:\n\n");
-    
-    // Position 1: Centered
-    printf("1. Place car CENTERED on line, press ENTER...\n");
-    getchar();
-    sleep_ms(500);
-    uint32_t sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += ir_read_left_adc();
-        sleep_ms(50);
-    }
-    cal_centered_adc = sum / 10;
-    printf("   → Centered ADC: %u\n\n", cal_centered_adc);
-    
-    // Position 2: Slightly off (good tracking)
-    printf("2. Move car SLIGHTLY RIGHT (still mostly on line), press ENTER...\n");
-    getchar();
-    sleep_ms(500);
-    sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += ir_read_left_adc();
-        sleep_ms(50);
-    }
-    cal_good_adc = sum / 10;
-    printf("   → Slightly off ADC: %u\n\n", cal_good_adc);
-    
-    // Position 3: Edge of line
-    printf("3. Move car to EDGE of line (left sensor barely on black), press ENTER...\n");
-    getchar();
-    sleep_ms(500);
-    sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += ir_read_left_adc();
-        sleep_ms(50);
-    }
-    cal_edge_adc = sum / 10;
-    printf("   → Edge ADC: %u\n\n", cal_edge_adc);
-    
-    // Position 4: Barely on line
-    printf("4. Move car FURTHER RIGHT (barely touching line), press ENTER...\n");
-    getchar();
-    sleep_ms(500);
-    sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += ir_read_left_adc();
-        sleep_ms(50);
-    }
-    cal_barely_on_adc = sum / 10;
-    printf("   → Barely on ADC: %u\n\n", cal_barely_on_adc);
-    
-    printf("╔════════════════════════════════════════════════╗\n");
-    printf("║   CALIBRATION COMPLETE!                        ║\n");
-    printf("╚════════════════════════════════════════════════╝\n\n");
-    printf("Copy these values to your code:\n");
-    printf("static uint16_t cal_centered_adc = %u;\n", cal_centered_adc);
-    printf("static uint16_t cal_good_adc = %u;\n", cal_good_adc);
-    printf("static uint16_t cal_edge_adc = %u;\n", cal_edge_adc);
-    printf("static uint16_t cal_barely_on_adc = %u;\n\n", cal_barely_on_adc);
 }
 
 // ===== Reset internal state =====
