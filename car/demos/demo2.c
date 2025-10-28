@@ -1,8 +1,11 @@
 // demo2.c - Line Following + Barcode Navigation + IMU Heading Correction
-// Purpose: Full perception-decision-action loop for Demo 2 using existing libraries
+// Purpose: Complete perception-decision-action loop for autonomous navigation
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 #include "pico/stdlib.h"
+#include "pico/time.h"
+#include "hardware/irq.h"
 #include "config.h"
 #include "motor.h"
 #include "encoder.h"
@@ -15,42 +18,49 @@
 // CONFIGURATION PARAMETERS
 // ============================================================================
 
-#define LINE_FOLLOW_SPEED_PCT  25       // Base speed while following line
-#define TURN_SPEED_PCT         20       // Speed during turns
+#define LINE_FOLLOW_SPEED_PCT  20       // Base speed (matches demo1 20%)
+#define TURN_SPEED_PCT         18       // Speed during turns (slightly lower)
 #define TURN_ANGLE_90          90.0f    // LEFT/RIGHT turn angle
 #define TURN_ANGLE_180         180.0f   // U-TURN angle
-#define TURN_TOLERANCE_DEG     5.0f     // Turn completion threshold
+#define TURN_TOLERANCE_DEG     5.0f     // Turn completion threshold (±5°)
+#define TURN_OVERSHOOT_COMP    3.0f     // Overshoot compensation (degrees)
 
-#define LOOP_DT_MS             10       // 100 Hz control loop
+#define LOOP_DT_MS             10       // 100 Hz control loop (same as demo1)
 #define DT_S                   ((float)LOOP_DT_MS / 1000.0f)
 
 // ============================================================================
-// LINE FOLLOWING PID GAINS (for 1.7cm thin line with single sensor)
+// LINE FOLLOWING PID GAINS (optimized for 1.7cm thin line)
 // ============================================================================
-#define LINE_KP                0.75f    // Aggressive for tight line
-#define LINE_KI                0.10f
-#define LINE_KD                0.12f
-#define LINE_BIAS_MAX_CPS      12.0f    // Max steering correction
+// These are SEPARATE from motor PID - this controls steering bias
+#define LINE_KP                0.85f    // Increased for tighter line tracking
+#define LINE_KI                0.12f    // Small integral to eliminate steady-state error
+#define LINE_KD                0.15f    // Derivative to dampen oscillations
+#define LINE_BIAS_MAX_CPS      15.0f    // Max steering correction (cps units)
 
-// IMU heading correction (same as demo1)
-#define IMU_HEADING_KP         0.25f
-#define IMU_HEADING_KI         0.02f
+// IMU heading correction gains (reuse from demo1)
+#define IMU_HEADING_KP         0.35f
+#define IMU_HEADING_KI         0.04f
 #define IMU_HEADING_KD         0.00f
-#define IMU_BIAS_MAX_CPS       6.0f
+#define IMU_BIAS_MAX_CPS       8.0f
 
-// Line loss detection
-#define LINE_LOST_COUNT_MAX    100      // 1.0s of no line = lost
+// Line loss recovery
+#define LINE_LOST_COUNT_MAX    150      // 1.5s of no line = lost (100Hz * 1.5s)
+#define LINE_RECOVERY_TIMEOUT  200      // 2.0s max recovery attempt
+
+// Barcode detection safety
+#define BARCODE_MIN_INTERVAL_MS  3000   // 3 seconds between barcode actions
 
 // ============================================================================
 // STATE MACHINE
 // ============================================================================
 typedef enum {
-    STATE_IDLE,
-    STATE_LINE_FOLLOW,
-    STATE_BARCODE_DETECTED,
-    STATE_EXECUTING_TURN,
-    STATE_STOPPED,
-    STATE_LINE_LOST
+    STATE_IDLE,              // Waiting for START button
+    STATE_LINE_FOLLOW,       // Normal line following mode
+    STATE_BARCODE_DETECTED,  // Barcode just detected, processing command
+    STATE_EXECUTING_TURN,    // Performing commanded turn
+    STATE_REACQUIRE_LINE,    // Finding line after turn
+    STATE_STOPPED,           // Emergency stop or completion
+    STATE_LINE_LOST          // Line lost, attempting recovery
 } robot_state_t;
 
 // ============================================================================
@@ -61,6 +71,17 @@ static barcode_cmd_t g_pending_command = BARCODE_NONE;
 static float g_target_heading_deg = 0.0f;
 static float g_initial_heading_deg = 0.0f;
 static uint32_t g_line_lost_count = 0;
+static uint32_t g_recovery_count = 0;
+static absolute_time_t g_last_barcode_time;
+static bool g_first_run = true;
+
+// Run control (from demo1)
+static volatile bool running = false;
+static volatile bool g_override_motion = false;
+
+// Timers (reuse demo1 architecture)
+static repeating_timer_t control_timer_motor;
+static repeating_timer_t control_timer_main;
 
 // ============================================================================
 // LINE FOLLOWING PID (separate from motor PID)
@@ -76,20 +97,7 @@ static PID pid_line_follow = {
 };
 
 // ============================================================================
-// IMU HEADING PID (for long-term drift correction)
-// ============================================================================
-static PID pid_imu_heading = {
-    .kp = IMU_HEADING_KP,
-    .ki = IMU_HEADING_KI,
-    .kd = IMU_HEADING_KD,
-    .integ = 0,
-    .prev_err = 0,
-    .out_min = -IMU_BIAS_MAX_CPS,
-    .out_max = IMU_BIAS_MAX_CPS
-};
-
-// ============================================================================
-// TELEMETRY CACHE
+// TELEMETRY CACHE (for 5Hz printing)
 // ============================================================================
 static struct {
     line_reading_t line_reading;
@@ -100,7 +108,9 @@ static struct {
     float distance_cm;
     float line_bias_cps;
     float imu_bias_cps;
+    float encoder_diff_cps;
     robot_state_t state;
+    uint32_t loop_count;
 } g_telem = {0};
 
 // ============================================================================
@@ -113,75 +123,89 @@ static inline float wrap180(float a) {
     return a;
 }
 
+static inline bool btn_pressed(uint gpio) {
+    return gpio_get(gpio) == 0;
+}
 
 // ============================================================================
-// LINE FOLLOWING CONTROLLER
+// LINE FOLLOWING CONTROLLER (PID on analog error)
 // ============================================================================
 static float line_follow_pid_controller(line_reading_t *reading, float dt) {
-    // Use analog error from line sensor
+    // Use analog error from line sensor (positive = drifted left, need right correction)
     float err = reading->error;
     
-    // Apply PID
+    // Apply line following PID
+    // Note: We negate the error because positive error (drift left) needs negative bias (right turn)
     float bias = pid_step(&pid_line_follow, 0.0f, -err, dt);
+    
+    // Store for telemetry
     g_telem.line_bias_cps = bias;
     
     return bias;
 }
 
 // ============================================================================
-// IMU HEADING CORRECTION
+// IMU HEADING CORRECTION (Long-term drift prevention)
 // ============================================================================
 static float imu_heading_correction(float current_heading, float dt) {
-    imu_state_t imu;
-    if (!imu_read(&imu) || !imu.ok) {
-        g_telem.imu_bias_cps = 0.0f;
-        return 0.0f;
-    }
-
-    float err_deg = wrap180(current_heading - g_initial_heading_deg);
-    g_telem.heading_error_deg = err_deg;
+    // Reuse demo1's IMU heading bias calculation with supervisor
+    float bias = imu_get_heading_bias(g_initial_heading_deg, dt);
     
-    // Deadband
-    if (fabsf(err_deg) < 2.0f) err_deg = 0.0f;
-
-    float bias = pid_step(&pid_imu_heading, 0.0f, -err_deg, dt);
+    // Store for telemetry
     g_telem.imu_bias_cps = bias;
+    g_telem.heading_error_deg = g_heading_err_deg;
     
     return bias;
 }
 
 // ============================================================================
-// TURN EXECUTION
+// TURN EXECUTION (With IMU feedback)
 // ============================================================================
 static bool execute_turn(float current_heading, float dt) {
     static float last_hdg = 0.0f;
     static int stall_count = 0;
+    static int settle_count = 0;
 
     float delta = wrap180(g_target_heading_deg - current_heading);
     
+    // Check if we're within tolerance
     if (fabsf(delta) < TURN_TOLERANCE_DEG) {
-        motion_command(MOVE_STOP, 0);
-        stall_count = 0;
-        return true;
-    }
-
-    // Proportional turn rate
-    float turn_rate_cps = clampf(delta * 0.6f, -18.0f, 18.0f);
-    
-    if (delta > 0) {
-        motion_command_with_bias(MOVE_FORWARD, TURN_SPEED_PCT, 
-                                -turn_rate_cps, turn_rate_cps);
+        settle_count++;
+        
+        // Require stable heading for 300ms (30 samples @ 100Hz)
+        if (settle_count > 30) {
+            motion_command(MOVE_STOP, 0);
+            stall_count = 0;
+            settle_count = 0;
+            printf("[DEMO2] Turn complete: target=%.1f° current=%.1f° delta=%.1f°\n",
+                   g_target_heading_deg, current_heading, delta);
+            return true;
+        }
     } else {
-        motion_command_with_bias(MOVE_FORWARD, TURN_SPEED_PCT, 
-                                turn_rate_cps, -turn_rate_cps);
+        settle_count = 0;
     }
 
-    // Stall detection
-    if (fabsf(current_heading - last_hdg) < 0.5f) {
+    // Proportional turn rate with speed limits
+    float turn_rate_cps = clampf(delta * 0.7f, -20.0f, 20.0f);
+    
+    // Apply differential turn (one wheel forward, one backward)
+    if (delta > 0) {
+        // Need to turn left (CCW)
+        motion_command_with_bias(MOVE_FORWARD, TURN_SPEED_PCT, 
+                                -fabsf(turn_rate_cps), fabsf(turn_rate_cps));
+    } else {
+        // Need to turn right (CW)
+        motion_command_with_bias(MOVE_FORWARD, TURN_SPEED_PCT, 
+                                fabsf(turn_rate_cps), -fabsf(turn_rate_cps));
+    }
+
+    // Stall detection (heading not changing)
+    if (fabsf(current_heading - last_hdg) < 0.3f) {
         stall_count++;
-        if (stall_count > 100) {
+        if (stall_count > 150) { // 1.5 seconds
             printf("[DEMO2] Turn stalled, forcing completion\n");
             stall_count = 0;
+            settle_count = 0;
             return true;
         }
     } else {
@@ -193,19 +217,485 @@ static bool execute_turn(float current_heading, float dt) {
 }
 
 // ============================================================================
-// TELEMETRY PRINT (5 Hz)
+// LINE REACQUISITION (After turn completion)
+// ============================================================================
+static bool reacquire_line(line_reading_t *reading) {
+    static uint32_t reacq_count = 0;
+    static bool sweep_right = true;
+    
+    // Check if line found
+    if (reading->line_detected && reading->confidence > 0.7f) {
+        reacq_count = 0;
+        sweep_right = true;
+        printf("[DEMO2] Line reacquired (ADC=%u)\n", reading->raw_adc);
+        return true;
+    }
+    
+    reacq_count++;
+    
+    // Sweep pattern: alternate small movements
+    if (reacq_count % 50 == 0) { // Change direction every 0.5s
+        sweep_right = !sweep_right;
+    }
+    
+    if (sweep_right) {
+        motion_command(MOVE_RIGHT, 15);
+    } else {
+        motion_command(MOVE_LEFT, 15);
+    }
+    
+    // Timeout after 3 seconds
+    if (reacq_count > 300) {
+        printf("[DEMO2] Reacquisition timeout\n");
+        reacq_count = 0;
+        sweep_right = true;
+        return false; // Failed to reacquire
+    }
+    
+    return false;
+}
+
+// ============================================================================
+// LINE LOSS RECOVERY
+// ============================================================================
+static bool attempt_line_recovery(line_reading_t *reading) {
+    g_recovery_count++;
+    
+    // Check if line reacquired
+    if (reading->line_detected) {
+        g_recovery_count = 0;
+        printf("[RECOVERY] Line reacquired\n");
+        return true;
+    }
+    
+    // Recovery strategy: slow reverse
+    if (g_recovery_count < 100) { // First second: reverse
+        motion_command(MOVE_BACKWARD, 15);
+    } else { // Then try sweeping
+        if ((g_recovery_count / 50) % 2 == 0) {
+            motion_command(MOVE_LEFT, 15);
+        } else {
+            motion_command(MOVE_RIGHT, 15);
+        }
+    }
+    
+    // Timeout
+    if (g_recovery_count > LINE_RECOVERY_TIMEOUT) {
+        printf("[RECOVERY] Failed - line not found\n");
+        g_recovery_count = 0;
+        return false;
+    }
+    
+    return false;
+}
+
+// ============================================================================
+// MAIN CONTROL LOOP CALLBACK (100 Hz) - Reuses demo1 architecture
+// ============================================================================
+static bool main_control_cb(repeating_timer_t* t) {
+    volatile bool* p_run = (volatile bool*)t->user_data;
+    const float dt = DT_S;
+    
+    // Initialize run start time on first run
+    // static absolute_time_t run_t0;
+    // if (g_first_run && p_run && *p_run) {
+    //     run_t0 = get_absolute_time();
+    //     g_first_run = false;
+    // }
+
+    // Stop motors if not running and not overridden
+    if (!p_run || !*p_run) {
+        if (!g_override_motion) {
+            motion_command(MOVE_STOP, 0);
+        }
+        g_first_run = true;
+        return true;
+    }
+
+    g_telem.loop_count++;
+
+    // ===== 1) READ ALL SENSORS =====
+    
+    // Line sensor (left IR)
+    line_reading_t line = ir_get_line_error();
+    g_telem.line_reading = line;
+    
+    // Barcode sensor (right IR) - non-blocking poll
+    barcode_result_t barcode_res = {0};
+    bool barcode_detected = barcode_poll(&barcode_res);
+    
+    // IMU data
+    imu_state_t imu_data;
+    bool imu_ok = imu_read(&imu_data) && imu_data.ok;
+    float current_heading = imu_ok ? imu_data.heading_deg_filt : g_target_heading_deg;
+    g_telem.heading_deg = current_heading;
+
+    // Encoder data (for telemetry)
+    float cps_r, cps_l;
+    get_cps_smoothed(&cps_r, &cps_l);
+    g_telem.encoder_diff_cps = cps_r - cps_l;
+    g_telem.speed_cmps = get_average_speed_cmps();
+    g_telem.distance_cm = get_average_distance_cm();
+    g_telem.state = g_state;
+
+    // ===== 2) STATE MACHINE =====
+    
+    switch (g_state) {
+        // --------------------------------------------------------------------
+        case STATE_LINE_FOLLOW: {
+            // Check for barcode detection
+            uint64_t time_since_last = absolute_time_diff_us(g_last_barcode_time, get_absolute_time());
+            
+            if (barcode_detected && 
+                barcode_res.command != BARCODE_NONE &&
+                time_since_last > (BARCODE_MIN_INTERVAL_MS * 1000)) {
+                
+                g_pending_command = barcode_res.command;
+                g_telem.last_barcode = barcode_res.command;
+                g_state = STATE_BARCODE_DETECTED;
+                g_last_barcode_time = get_absolute_time();
+                
+                printf("[BARCODE] Detected: %s (bars=%u, conf=%u%%)\n", 
+                       barcode_cmd_str(g_pending_command),
+                       barcode_res.bar_count,
+                       barcode_res.confidence);
+                
+                barcode_reset();
+                break;
+            }
+
+            // Check for line loss
+            if (!line.line_detected) {
+                g_line_lost_count++;
+                if (g_line_lost_count > LINE_LOST_COUNT_MAX) {
+                    g_state = STATE_LINE_LOST;
+                    motion_command(MOVE_STOP, 0);
+                    printf("[WARN] Line LOST (count=%lu)\n", g_line_lost_count);
+                    break;
+                }
+            } else {
+                g_line_lost_count = 0;
+            }
+
+            // === NORMAL LINE FOLLOWING WITH CASCADED PID ===
+            
+            // Get current smoothed wheel speeds
+            float base_pct = (float)LINE_FOLLOW_SPEED_PCT;
+            float base_cps = (MAX_CPS * base_pct) / 100.0f;
+            
+            // (A) Line following PID (primary steering)
+            float line_bias = line_follow_pid_controller(&line, dt);
+            
+            // (B) IMU heading correction (slow drift prevention)
+            float imu_bias = imu_heading_correction(current_heading, dt);
+            
+            // (C) Encoder balance PID (from demo1 architecture)
+            float diff_meas = cps_r - cps_l;
+            float encoder_bias = pid_step(&pid_track, 0.0f, -diff_meas, dt);
+            
+            // Apply limits to each bias component
+            float lim_line = fmaxf(BIAS_MIN_CPS, BIAS_TRACK_FRACTION * base_cps);
+            float lim_imu = fmaxf(BIAS_MIN_HEAD_CPS, BIAS_HEAD_FRACTION * base_cps);
+            float lim_enc = fmaxf(BIAS_MIN_CPS, 0.45f * base_cps);
+            
+            line_bias = clampf(line_bias, -lim_line, lim_line);
+            imu_bias = clampf(imu_bias, -lim_imu, lim_imu);
+            encoder_bias = clampf(encoder_bias, -lim_enc, lim_enc);
+            
+            // Combine biases with weighting
+            // Priority: Line > Encoder > IMU
+            float total_bias = line_bias * 0.60f +        // Line following dominant
+                              encoder_bias * 0.25f +       // Encoder balance secondary
+                              imu_bias * 0.15f;            // IMU trim tertiary
+            
+            // Final safety clamp
+            float lim_total = fmaxf(BIAS_MIN_TOTAL_CPS, BIAS_TOTAL_FRACTION * base_cps);
+            total_bias = clampf(total_bias, -lim_total, lim_total);
+            
+            // Update adaptive wheel scaling (from demo1)
+            motor_update_adaptive_scale(diff_meas, dt, base_cps);
+            
+            // Command motion: positive bias = left faster, right slower
+            motion_command_with_bias(MOVE_FORWARD, LINE_FOLLOW_SPEED_PCT,
+                                    total_bias,   // Left wheel adjustment
+                                    -total_bias); // Right wheel adjustment (opposite)
+            
+            break;
+        }
+        
+        // --------------------------------------------------------------------
+        case STATE_BARCODE_DETECTED: {
+            // Process barcode command
+            switch (g_pending_command) {
+                case BARCODE_LEFT:
+                    // Apply overshoot compensation
+                    g_target_heading_deg = wrap180(current_heading - TURN_ANGLE_90 + TURN_OVERSHOOT_COMP);
+                    g_state = STATE_EXECUTING_TURN;
+                    printf("[TURN] LEFT 90° → target=%.1f°\n", g_target_heading_deg);
+                    break;
+
+                case BARCODE_RIGHT:
+                    g_target_heading_deg = wrap180(current_heading + TURN_ANGLE_90 - TURN_OVERSHOOT_COMP);
+                    g_state = STATE_EXECUTING_TURN;
+                    printf("[TURN] RIGHT 90° → target=%.1f°\n", g_target_heading_deg);
+                    break;
+
+                case BARCODE_UTURN:
+                    g_target_heading_deg = wrap180(current_heading + TURN_ANGLE_180);
+                    g_state = STATE_EXECUTING_TURN;
+                    printf("[TURN] U-TURN 180° → target=%.1f°\n", g_target_heading_deg);
+                    break;
+
+                case BARCODE_STOP:
+                    motion_command(MOVE_STOP, 0);
+                    g_state = STATE_STOPPED;
+                    printf("[STOP] Halted by barcode command\n");
+                    break;
+
+                default:
+                    g_state = STATE_LINE_FOLLOW;
+                    break;
+            }
+            
+            g_pending_command = BARCODE_NONE;
+            break;
+        }
+        
+        // --------------------------------------------------------------------
+        case STATE_EXECUTING_TURN: {
+            bool turn_done = execute_turn(current_heading, dt);
+            
+            if (turn_done) {
+                printf("[TURN] Complete (heading=%.1f°)\n", current_heading);
+                motion_command(MOVE_STOP, 0);
+                sleep_ms(300); // Brief settle
+                
+                // Update reference heading
+                g_initial_heading_deg = g_target_heading_deg;
+                
+                // Reset all PIDs
+                pid_reset(&pid_line_follow);
+                pid_reset(&pid_track);
+                imu_reset_heading_filter(g_target_heading_deg);
+                imu_reset_heading_supervisor();
+                
+                g_state = STATE_REACQUIRE_LINE;
+                printf("[REACQUIRE] Searching for line...\n");
+            }
+            break;
+        }
+        
+        // --------------------------------------------------------------------
+        case STATE_REACQUIRE_LINE: {
+            bool line_found = reacquire_line(&line);
+            
+            if (line_found) {
+                g_state = STATE_LINE_FOLLOW;
+                g_line_lost_count = 0;
+                printf("[RESUME] Line following resumed\n");
+            } else if (g_recovery_count > 300) { // 3 second timeout
+                g_state = STATE_LINE_LOST;
+                printf("[REACQUIRE] Timeout → LINE_LOST\n");
+            }
+            break;
+        }
+        
+        // --------------------------------------------------------------------
+        case STATE_LINE_LOST: {
+            bool recovered = attempt_line_recovery(&line);
+            
+            if (recovered) {
+                g_state = STATE_LINE_FOLLOW;
+                g_line_lost_count = 0;
+                g_recovery_count = 0;
+            } else if (g_recovery_count >= LINE_RECOVERY_TIMEOUT) {
+                g_state = STATE_STOPPED;
+                motion_command(MOVE_STOP, 0);
+                printf("[ERROR] Recovery failed - stopping\n");
+            }
+            break;
+        }
+        
+        // --------------------------------------------------------------------
+        case STATE_STOPPED: {
+            motion_command(MOVE_STOP, 0);
+            
+            // Allow manual restart with START button
+            if (btn_pressed(BTN_START)) {
+                sleep_ms(200);
+                pid_reset(&pid_line_follow);
+                pid_reset(&pid_track);
+                imu_reset_heading_supervisor();
+                g_state = STATE_LINE_FOLLOW;
+                g_line_lost_count = 0;
+                g_recovery_count = 0;
+                printf("[RESTART] Resuming from STOPPED\n");
+            }
+            break;
+        }
+        
+        default:
+            g_state = STATE_LINE_FOLLOW;
+            break;
+    }
+
+    return true;
+}
+
+// ============================================================================
+// TELEMETRY PRINT (5 Hz) - Enhanced version
 // ============================================================================
 static void print_telemetry(void) {
-    printf("[DEMO2] State=%d LineErr=%.2f ADC=%u IMU_Err=%.1f° "
-           "Speed=%.1fcm/s Dist=%.1fcm LineBias=%.1f IMUBias=%.1f\n",
-           g_telem.state,
+    const char* state_str[] = {
+        "IDLE", "LINE_FOLLOW", "BARCODE_DET", "TURN", "REACQUIRE", "STOPPED", "LINE_LOST"
+    };
+    
+    printf("[DEMO2] State=%s Line[err=%.2f ADC=%u det=%d conf=%.2f] "
+           "Bias[line=%.1f imu=%.1f enc_diff=%.1f] "
+           "IMU[hdg=%.1f° err=%.1f° w=%.2f] "
+           "Speed=%.1fcm/s Dist=%.1fcm LastBC=%s\n",
+           state_str[g_telem.state],
            g_telem.line_reading.error,
            g_telem.line_reading.raw_adc,
+           g_telem.line_reading.line_detected,
+           g_telem.line_reading.confidence,
+           g_telem.line_bias_cps,
+           g_telem.imu_bias_cps,
+           g_telem.encoder_diff_cps,
+           g_telem.heading_deg,
            g_telem.heading_error_deg,
+           (double)g_head_weight,
            g_telem.speed_cmps,
            g_telem.distance_cm,
-           g_telem.line_bias_cps,
-           g_telem.imu_bias_cps);
+           barcode_cmd_str(g_telem.last_barcode));
+}
+
+// ============================================================================
+// CALIBRATION ROUTINES (from demo1)
+// ============================================================================
+
+static void do_mag_calibration(void) {
+    printf("CAL: magnetometer min/max... spinning 3s\n");
+    telemetry_set_mode(TMODE_CAL);
+
+    g_override_motion = true;
+    imu_cal_begin();
+
+    absolute_time_t t0 = get_absolute_time();
+    motion_command(MOVE_LEFT, 25);
+    
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 3000000) {
+        imu_state_t s;
+        if (imu_read(&s) && s.ok) { }
+        tight_loop_contents();
+    }
+    
+    motion_command(MOVE_STOP, 0);
+    imu_cal_end();
+    g_override_motion = false;
+
+    imu_state_t s;
+    if (imu_read(&s) && s.ok) {
+        imu_reset_heading_filter(s.heading_deg_filt);
+        g_initial_heading_deg = s.heading_deg_filt;
+        g_target_heading_deg = s.heading_deg_filt;
+        imu_reset_heading_supervisor();
+    }
+
+    printf("CAL: done. heading_ref=%.1f deg\n", g_initial_heading_deg);
+    telemetry_set_mode(TMODE_NONE);
+}
+
+static void do_auto_wheel_scale(void) {
+    printf("TRIM: auto wheel scale... driving 4.0s\n");
+    telemetry_set_mode(TMODE_CAL);
+
+    g_override_motion = true;
+    motion_command(MOVE_FORWARD, 20);
+    sleep_ms(500);
+
+    float sum_r = 0, sum_l = 0;
+    int n = 0;
+    absolute_time_t t0 = get_absolute_time();
+    
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 4000000) {
+        float r, l;
+        get_cps_smoothed(&r, &l);
+        sum_r += r;
+        sum_l += l;
+        n++;
+        sleep_ms(10);
+    }
+    
+    motion_command(MOVE_STOP, 0);
+
+    if (n > 0 && sum_l > 1.0f && sum_r > 1.0f) {
+        float r_avg = sum_r / (float)n;
+        float l_avg = sum_l / (float)n;
+        motor_calibrate_wheel_scale(r_avg, l_avg);
+        
+        float sr, sl;
+        motor_get_wheel_scale(&sr, &sl);
+        printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
+    } else {
+        motor_set_wheel_scale(1.0f, 1.0f);
+        printf("TRIM: skipped (low cps)\n");
+    }
+
+    g_override_motion = false;
+    telemetry_set_mode(TMODE_NONE);
+}
+
+static void do_boot_auto_cal(void) {
+    do_mag_calibration();
+    do_auto_wheel_scale();
+    motion_command(MOVE_STOP, 0);
+    printf("BOOT: auto calibration complete.\n");
+}
+
+static bool prompt_boot_cal(void) {
+    printf("BOOT: run auto-calibration before START? [y/N]\n");
+    printf("Press START = yes, STOP = no, or type y/n. Auto-skip in 10s...\n");
+    
+    absolute_time_t t0 = get_absolute_time();
+    while (absolute_time_diff_us(t0, get_absolute_time()) < 10000000) {
+        int ch = getchar_timeout_us(0);
+        if (ch == 'y' || ch == 'Y') { printf(" -> yes\n"); return true; }
+        if (ch == 'n' || ch == 'N') { printf(" -> no\n"); return false; }
+
+        if (btn_pressed(BTN_START)) {
+            sleep_ms(100);
+            if (btn_pressed(BTN_START)) {
+                printf(" -> yes (START)\n");
+                return true;
+            }
+        }
+        if (btn_pressed(BTN_STOP)) {
+            sleep_ms(100);
+            if (btn_pressed(BTN_STOP)) {
+                printf(" -> no (STOP)\n");
+                return false;
+            }
+        }
+
+        tight_loop_contents();
+    }
+    
+    printf("-> timeout; skipping auto-calibration.\n");
+    return false;
+}
+
+// ============================================================================
+// BUTTON INITIALIZATION
+// ============================================================================
+static void buttons_init(void) {
+    gpio_init(BTN_START);
+    gpio_set_dir(BTN_START, GPIO_IN);
+    gpio_pull_up(BTN_START);
+    
+    gpio_init(BTN_STOP);
+    gpio_set_dir(BTN_STOP, GPIO_IN);
+    gpio_pull_up(BTN_STOP);
 }
 
 // ============================================================================
@@ -213,34 +703,45 @@ static void print_telemetry(void) {
 // ============================================================================
 static void system_init(void) {
     stdio_init_all();
-    sleep_ms(10000);
+    sleep_ms(10000); // Allow USB enumeration
+    
     printf("\n╔═══════════════════════════════════════════════════════════╗\n");
-    printf("║   DEMO 2: Line Following + Barcode + IMU (Refactored)    ║\n");
+    printf("║   DEMO 2: Line Following + Barcode + PID + IMU (Full)    ║\n");
+    printf("║   Built on Demo1 Control Architecture                    ║\n");
     printf("║   Optimized for THIN LINE (1.7cm) - Single Left Sensor   ║\n");
     printf("╚═══════════════════════════════════════════════════════════╝\n\n");
 
+    buttons_init();
+
+    // Initialize IMU
     if (!imu_init()) {
-        printf("[ERROR] IMU init FAILED\n");
+        printf("[ERROR] IMU init FAILED - check I2C wiring!\n");
         while (1) sleep_ms(1000);
     }
-    printf("[OK] IMU initialized\n");
+    printf("[OK] IMU initialized (GP%d=SDA, GP%d=SCL)\n", I2C_SDA, I2C_SCL);
 
+    // Initialize motors
     motor_init();
-    printf("[OK] Motors initialized\n");
+    printf("[OK] Motors initialized (M1: GP%d,GP%d,GP%d | M2: GP%d,GP%d,GP%d)\n",
+           M1_IN1, M1_IN2, ENCODER_PIN_M1, M2_IN1, M2_IN2, ENCODER_PIN_M2);
 
+    // Initialize line sensor
     ir_line_init();
-    printf("[OK] Line sensor initialized (GP%d)\n", IR_LEFT_ADC);
+    printf("[OK] Line sensor initialized (GP%d=ADC2)\n", IR_LEFT_ADC);
 
+    // Initialize barcode scanner
     barcode_init();
-    printf("[OK] Barcode scanner initialized (GP%d)\n", BARCODE_ADC_GPIO);
+    printf("[OK] Barcode scanner initialized (GP%d=ADC0)\n", BARCODE_ADC_GPIO);
 
+    // Initialize PIDs
+    pid_init_defaults();
     pid_reset(&pid_line_follow);
-    pid_reset(&pid_imu_heading);
-    printf("[OK] PID controllers initialized\n");
+    printf("[OK] PID controllers initialized (track + heading + line)\n");
 
-    static repeating_timer_t motor_control_timer;
-    add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &motor_control_timer);
-    printf("[OK] Motor control timer started (100 Hz)\n");
+    // Start control timers (reuse demo1 architecture)
+    add_repeating_timer_ms(-CONTROL_PERIOD_MS, motor_control_timer_cb, NULL, &control_timer_motor);
+    add_repeating_timer_ms(-CONTROL_PERIOD_MS, main_control_cb, (void*)&running, &control_timer_main);
+    printf("[OK] Control timers started (100 Hz)\n");
 
     // Capture initial heading
     printf("[INIT] Capturing initial heading...\n");
@@ -250,12 +751,15 @@ static void system_init(void) {
         g_initial_heading_deg = imu.heading_deg_filt;
         g_target_heading_deg = g_initial_heading_deg;
         imu_reset_heading_filter(g_initial_heading_deg);
+        imu_reset_heading_supervisor();
         printf("[OK] Initial heading: %.1f°\n", g_initial_heading_deg);
     } else {
         printf("[WARN] IMU not ready, using 0.0°\n");
         g_initial_heading_deg = 0.0f;
         g_target_heading_deg = 0.0f;
     }
+    
+    g_last_barcode_time = get_absolute_time();
 }
 
 // ============================================================================
@@ -264,185 +768,73 @@ static void system_init(void) {
 int main(void) {
     system_init();
 
+    // Boot calibration prompt
+    if (prompt_boot_cal()) {
+        do_boot_auto_cal();
+    } else {
+        printf("BOOT: auto-calibration skipped.\n");
+    }
+
     printf("═══════════════════════════════════════════════════════════\n");
-    printf("  Press START (GP21) to begin line following...\n");
+    printf("  Press START (GP21) to begin autonomous navigation...\n");
     printf("═══════════════════════════════════════════════════════════\n\n");
     
-    while (gpio_get(BTN_START) != 0) {
+    // Wait for START button
+    while (btn_pressed(BTN_START) != true) {
         tight_loop_contents();
     }
     sleep_ms(200);
     
     printf("[START] Robot activated!\n\n");
+    
+    // Reset everything for clean start
     motor_reset_distance_counters();
+    motor_reset_controllers();
+    motor_reset_speed_filters();
+    motor_reset_adaptive_scale();
+    pid_reset(&pid_line_follow);
+    pid_reset(&pid_track);
+    imu_reset_heading_supervisor();
+    ir_line_reset_state();
+    barcode_reset();
+    
     g_state = STATE_LINE_FOLLOW;
+    g_first_run = true;
+    running = true;
+    
+    print_telemetry_legend();
 
     absolute_time_t t_next = make_timeout_time_ms(LOOP_DT_MS);
     uint32_t telem_div = 0;
 
-    // ========== MAIN CONTROL LOOP (100 Hz) ==========
+    // ========== MAIN LOOP (Background for telemetry and emergency stop) ==========
     while (true) {
-        // ===== 1) READ SENSORS =====
-        line_reading_t line = ir_get_line_error();
-        
-        barcode_result_t barcode_res = {0};
-        bool barcode_detected = barcode_poll(&barcode_res);
-        
-        imu_state_t imu_data;
-        bool imu_ok = imu_read(&imu_data) && imu_data.ok;
-        float current_heading = imu_ok ? imu_data.heading_deg_filt : g_target_heading_deg;
-
-        float avg_speed = get_average_speed_cmps();
-        float avg_dist = get_average_distance_cm();
-
-        // Update telemetry
-        g_telem.line_reading = line;
-        g_telem.heading_deg = current_heading;
-        g_telem.speed_cmps = avg_speed;
-        g_telem.distance_cm = avg_dist;
-        g_telem.state = g_state;
-
-        // ===== 2) STATE MACHINE =====
-        switch (g_state) {
-            case STATE_LINE_FOLLOW: {
-                // Check for barcode
-                if (barcode_detected && barcode_res.command != BARCODE_NONE) {
-                    g_pending_command = barcode_res.command;
-                    g_telem.last_barcode = barcode_res.command;
-                    g_state = STATE_BARCODE_DETECTED;
-                    printf("[BARCODE] Detected: %s\n", barcode_cmd_str(g_pending_command));
-                    barcode_reset();
-                    break;
-                }
-
-                // Check for line loss
-                if (!line.line_detected) {
-                    g_line_lost_count++;
-                    if (g_line_lost_count > LINE_LOST_COUNT_MAX) {
-                        g_state = STATE_LINE_LOST;
-                        motion_command(MOVE_STOP, 0);
-                        printf("[WARN] Line LOST\n");
-                        break;
-                    }
-                } else {
-                    g_line_lost_count = 0;
-                }
-
-                // Normal line following with combined PID
-                float line_bias = line_follow_pid_controller(&line, DT_S);
-                float imu_bias = imu_heading_correction(current_heading, DT_S);
-                
-                // Combine (line following is primary)
-                float total_bias = line_bias + (imu_bias * 0.25f);
-                total_bias = clampf(total_bias, -LINE_BIAS_MAX_CPS, LINE_BIAS_MAX_CPS);
-                
-                motion_command_with_bias(MOVE_FORWARD, LINE_FOLLOW_SPEED_PCT, 
-                                        total_bias, -total_bias);
-                break;
-            }
-
-            case STATE_BARCODE_DETECTED: {
-                switch (g_pending_command) {
-                    case BARCODE_LEFT:
-                        g_target_heading_deg = wrap180(current_heading - TURN_ANGLE_90);
-                        g_state = STATE_EXECUTING_TURN;
-                        printf("[TURN] LEFT to %.1f°\n", g_target_heading_deg);
-                        break;
-
-                    case BARCODE_RIGHT:
-                        g_target_heading_deg = wrap180(current_heading + TURN_ANGLE_90);
-                        g_state = STATE_EXECUTING_TURN;
-                        printf("[TURN] RIGHT to %.1f°\n", g_target_heading_deg);
-                        break;
-
-                    case BARCODE_UTURN:
-                        g_target_heading_deg = wrap180(current_heading + TURN_ANGLE_180);
-                        g_state = STATE_EXECUTING_TURN;
-                        printf("[TURN] U-TURN to %.1f°\n", g_target_heading_deg);
-                        break;
-
-                    case BARCODE_STOP:
-                        motion_command(MOVE_STOP, 0);
-                        g_state = STATE_STOPPED;
-                        printf("[STOP] Halted\n");
-                        break;
-
-                    default:
-                        g_state = STATE_LINE_FOLLOW;
-                        break;
-                }
-                g_pending_command = BARCODE_NONE;
-                break;
-            }
-
-            case STATE_EXECUTING_TURN: {
-                bool turn_done = execute_turn(current_heading, DT_S);
-                if (turn_done) {
-                    printf("[TURN] Complete (%.1f°)\n", current_heading);
-                    motion_command(MOVE_STOP, 0);
-                    sleep_ms(300);
-                    
-                    g_initial_heading_deg = g_target_heading_deg;
-                    pid_reset(&pid_line_follow);
-                    pid_reset(&pid_imu_heading);
-                    
-                    g_state = STATE_LINE_FOLLOW;
-                    printf("[RESUME] Line follow\n");
-                }
-                break;
-            }
-
-            case STATE_STOPPED: {
-                motion_command(MOVE_STOP, 0);
-                
-                if (gpio_get(BTN_START) == 0) {
-                    sleep_ms(200);
-                    pid_reset(&pid_line_follow);
-                    pid_reset(&pid_imu_heading);
-                    g_state = STATE_LINE_FOLLOW;
-                    printf("[RESTART] Resuming\n");
-                }
-                break;
-            }
-
-            case STATE_LINE_LOST: {
-                // Attempt recovery (reverse slowly)
-                motion_command(MOVE_BACKWARD, 15);
-                sleep_ms(500);
-                motion_command(MOVE_STOP, 0);
-                
-                // Check if line reacquired
-                line_reading_t check = ir_get_line_error();
-                if (check.line_detected) {
-                    g_state = STATE_LINE_FOLLOW;
-                    g_line_lost_count = 0;
-                    printf("[RECOVERY] Line reacquired\n");
-                } else {
-                    g_state = STATE_STOPPED;
-                    printf("[RECOVERY] Failed - stopping\n");
-                }
-                break;
-            }
-
-            default:
-                g_state = STATE_LINE_FOLLOW;
-                break;
-        }
-
-        // ===== 3) TELEMETRY (5 Hz) =====
+        // Telemetry printing (5 Hz)
         if ((telem_div++ % (1000 / LOOP_DT_MS / 5)) == 0) {
             print_telemetry();
         }
 
-        // ===== 4) EMERGENCY STOP =====
-        if (gpio_get(BTN_STOP) == 0) {
+        // Emergency stop button
+        if (btn_pressed(BTN_STOP)) {
             motion_command(MOVE_STOP, 0);
+            running = false;
             g_state = STATE_STOPPED;
-            printf("\n[EMERGENCY] STOP pressed\n");
+            printf("\n[EMERGENCY] STOP button pressed\n");
             sleep_ms(500);
+            
+            // Wait for START to resume
+            while (!btn_pressed(BTN_START)) {
+                tight_loop_contents();
+            }
+            sleep_ms(200);
+            
+            printf("[RESTART] Resuming...\n");
+            running = true;
+            g_state = STATE_LINE_FOLLOW;
+            g_first_run = true;
         }
 
-        // ===== 5) LOOP TIMING =====
+        // Loop timing
         sleep_until(t_next);
         t_next = delayed_by_ms(t_next, LOOP_DT_MS);
     }
