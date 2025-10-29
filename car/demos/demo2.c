@@ -32,20 +32,21 @@
 // LINE FOLLOWING PID GAINS (optimized for 1.7cm thin line)
 // ============================================================================
 // These are SEPARATE from motor PID - this controls steering bias
-#define LINE_KP                0.70f    //gentler proportional response
-#define LINE_KI                0.55f    // Reduced from 0.18f - slower integral buildup
-#define LINE_KD                0.05f    // Reduced from 0.25f - less aggressive damping
-#define LINE_BIAS_MAX_CPS      18.0f    // Reduced from 18.0f - limit max correction
+#define LINE_KP                0.50f    //gentler proportional response
+#define LINE_KI                0.15f    // Reduced from 0.18f - slower integral buildup
+#define LINE_KD                0.08f    // Reduced from 0.25f - less aggressive damping
+#define LINE_BIAS_MAX_CPS      12.0f    // Reduced from 18.0f - limit max correction
 
 // IMU heading correction gains (keep gentler for stability)
-#define IMU_HEADING_KP         0.40f
-#define IMU_HEADING_KI         0.05f
+#define IMU_HEADING_KP         0.30f
+#define IMU_HEADING_KI         0.03f
 #define IMU_HEADING_KD         0.00f
-#define IMU_BIAS_MAX_CPS       5.0f
+#define IMU_BIAS_MAX_CPS       4.0f
 
 // Line loss recovery
-#define LINE_LOST_COUNT_MAX    50      // 0.2s of no line = lost (100Hz * 0.2s)
+#define LINE_LOST_COUNT_MAX    30      // 0.3s of no line = lost (100Hz * 0.3s)
 #define LINE_RECOVERY_TIMEOUT  500      // 5.0s max recovery attempt
+#define RECOVERY_SPEED_PCT     15       // Slow speed during recovery
 
 // Barcode detection safety
 #define BARCODE_MIN_INTERVAL_MS  3000   // 3 seconds between barcode actions
@@ -75,11 +76,15 @@ static uint32_t g_recovery_count = 0;
 static absolute_time_t g_last_barcode_time;
 static bool g_first_run = true;
 
-// Run control (from demo1)
+// NEW: Directional memory for smarter recovery
+static float g_last_error_direction = 0.0f;  // Positive = was drifting left
+static bool g_have_error_memory = false;
+
+// Run control
 static volatile bool running = false;
 static volatile bool g_override_motion = false;
 
-// Timers (reuse demo1 architecture)
+// Timers
 static repeating_timer_t control_timer_motor;
 static repeating_timer_t control_timer_main;
 
@@ -131,22 +136,28 @@ static inline bool btn_pressed(uint gpio) {
 // LINE FOLLOWING CONTROLLER (PID on analog error)
 // ============================================================================
 static float line_follow_pid_controller(line_reading_t *reading, float dt) {
-    // Use analog error from line sensor (positive = drifted left, need right correction)
     float err = reading->error;
     
-    // Apply line following PID with reduced gains for smoother response
-    // Note: We negate the error because positive error (drift left) needs negative bias (right turn)
-    float bias = pid_step(&pid_line_follow, 0.0f, -err, dt);
-    
-    // Apply confidence-based scaling for uncertain readings
-    // When confidence is low, reduce correction strength to prevent overreaction
-    if (reading->confidence < 0.8f) {
-        bias *= (0.5f + 0.5f * reading->confidence);  // Scale down when uncertain
+    // Store error direction for recovery (only when confident)
+    if (reading->line_detected && reading->confidence > 0.7f) {
+        g_last_error_direction = err;
+        g_have_error_memory = true;
     }
     
-    // Store for telemetry
-    g_telem.line_bias_cps = bias;
+    // Apply PID with confidence-based anti-windup
+    float bias = pid_step(&pid_line_follow, 0.0f, -err, dt);
     
+    // Scale output based on confidence - less confident = gentler correction
+    if (reading->confidence < 0.8f) {
+        bias *= (0.6f + 0.4f * reading->confidence);  // Scale: 0.6 to 1.0
+        
+        // Reduce integral windup when uncertain
+        if (reading->confidence < 0.5f) {
+            pid_line_follow.integ *= 0.95f;  // Decay integral term
+        }
+    }
+    
+    g_telem.line_bias_cps = bias;
     return bias;
 }
 
@@ -223,72 +234,117 @@ static bool execute_turn(float current_heading, float dt) {
 }
 
 // ============================================================================
-// LINE REACQUISITION (After turn completion)
+// LINE REACQUISITION (with directional memory & speed ramping)
 // ============================================================================
 static bool reacquire_line(line_reading_t *reading) {
     static uint32_t reacq_count = 0;
     static bool sweep_right = true;
+    static uint32_t speed_ramp = 0;
     
-    // Check if line found
-    if (reading->line_detected && reading->confidence > 0.7f) {
+    // Check if line found with HIGH confidence
+    if (reading->line_detected && reading->confidence > 0.8f) {
         reacq_count = 0;
         sweep_right = true;
-        printf("[DEMO2] Line reacquired (ADC=%u)\n", reading->raw_adc);
+        speed_ramp = 0;
+        printf("[DEMO2] Line reacquired (ADC=%u, conf=%.2f)\n", 
+               reading->raw_adc, reading->confidence);
         return true;
     }
     
     reacq_count++;
     
-    // Sweep pattern: alternate small movements
-    if (reacq_count % 50 == 0) { // Change direction every 0.5s
+    // Use error memory to determine initial sweep direction
+    if (reacq_count == 1 && g_have_error_memory) {
+        // If we were drifting left (positive error), search right first
+        sweep_right = (g_last_error_direction > 0.5f);
+        printf("[REACQUIRE] Using error memory: drift=%.2f, searching %s\n",
+               g_last_error_direction, sweep_right ? "RIGHT" : "LEFT");
+    }
+    
+    // Speed ramping: start slow, increase gradually
+    speed_ramp = (reacq_count / 10) + 10;  // 10% to 20% over 100 iterations
+    if (speed_ramp > RECOVERY_SPEED_PCT) speed_ramp = RECOVERY_SPEED_PCT;
+    
+    // Alternate sweep direction every 0.5s (50 iterations)
+    if (reacq_count % 50 == 0) {
         sweep_right = !sweep_right;
+        printf("[REACQUIRE] Changing direction to %s (count=%lu)\n",
+               sweep_right ? "RIGHT" : "LEFT", reacq_count);
     }
     
     if (sweep_right) {
-        motion_command(MOVE_RIGHT, 15);
+        motion_command(MOVE_RIGHT, speed_ramp);
     } else {
-        motion_command(MOVE_LEFT, 15);
+        motion_command(MOVE_LEFT, speed_ramp);
     }
     
-    // Timeout after 3 seconds
+    // Timeout after 3 seconds (300 iterations @ 100Hz)
     if (reacq_count > 300) {
-        printf("[DEMO2] Reacquisition timeout\n");
+        printf("[REACQUIRE] Timeout after %lu iterations\n", reacq_count);
         reacq_count = 0;
         sweep_right = true;
-        return false; // Failed to reacquire
+        speed_ramp = 0;
+        return false;
     }
     
     return false;
 }
 
 // ============================================================================
-// LINE LOSS RECOVERY
+// LINE LOSS RECOVERY (with directional memory)
 // ============================================================================
 static bool attempt_line_recovery(line_reading_t *reading) {
+    static bool recovery_phase = 0;  // 0=reverse, 1=sweep
+    
     g_recovery_count++;
     
-    // Check if line reacquired
-    if (reading->line_detected) {
+    // Check if line reacquired with good confidence
+    if (reading->line_detected && reading->confidence > 0.7f) {
         g_recovery_count = 0;
-        printf("[RECOVERY] Line reacquired\n");
+        recovery_phase = 0;
+        printf("[RECOVERY] Line reacquired (ADC=%u)\n", reading->raw_adc);
         return true;
     }
     
-    // Recovery strategy: slow reverse
-    if (g_recovery_count < 100) { // First second: reverse
-        motion_command(MOVE_BACKWARD, 15);
-    } else { // Then try sweeping
+    // Phase 0: Reverse slowly (first 1 second = 100 iterations)
+    if (g_recovery_count < 100) {
+        if (g_recovery_count == 1) {
+            printf("[RECOVERY] Phase 1: Reversing...\n");
+        }
+        motion_command(MOVE_BACKWARD, RECOVERY_SPEED_PCT);
+    }
+    // Phase 1: Sweep based on last error direction
+    else {
+        if (g_recovery_count == 100) {
+            printf("[RECOVERY] Phase 2: Sweeping based on last error=%.2f\n", 
+                   g_last_error_direction);
+            recovery_phase = 1;
+        }
+        
+        // Use error memory for intelligent sweep
+        bool sweep_right = g_have_error_memory ? (g_last_error_direction > 0) : true;
+        
+        // Alternate every 0.5s (50 iterations)
         if ((g_recovery_count / 50) % 2 == 0) {
-            motion_command(MOVE_LEFT, 15);
+            if (sweep_right) {
+                motion_command(MOVE_RIGHT, RECOVERY_SPEED_PCT);
+            } else {
+                motion_command(MOVE_LEFT, RECOVERY_SPEED_PCT);
+            }
         } else {
-            motion_command(MOVE_RIGHT, 15);
+            if (sweep_right) {
+                motion_command(MOVE_LEFT, RECOVERY_SPEED_PCT);
+            } else {
+                motion_command(MOVE_RIGHT, RECOVERY_SPEED_PCT);
+            }
         }
     }
     
-    // Timeout
+    // Timeout after 3 seconds
     if (g_recovery_count > LINE_RECOVERY_TIMEOUT) {
-        printf("[RECOVERY] Failed - line not found\n");
+        printf("[RECOVERY] Failed after %lu iterations - line not found\n", g_recovery_count);
         g_recovery_count = 0;
+        recovery_phase = 0;
         return false;
     }
     
@@ -396,21 +452,20 @@ static bool main_control_cb(repeating_timer_t* t) {
             float encoder_bias = pid_step(&pid_track, 0.0f, -diff_meas, dt);
             
             // Limits scale with speed and line confidence
-            float confidence_factor = (line.confidence + 1.0f) / 2.0f;  // 0.5 to 1.0
+            float confidence_factor = clampf(line.confidence, 0.5f, 1.0f);
             
-            float lim_line = fmaxf(BIAS_MIN_CPS, 0.50f * base_cps * confidence_factor);
-            float lim_imu = fmaxf(BIAS_MIN_HEAD_CPS, 0.25f * base_cps);  // Reduced IMU influence
-            float lim_enc = fmaxf(BIAS_MIN_CPS, 0.35f * base_cps);
+            float lim_line = fmaxf(BIAS_MIN_CPS, 0.45f * base_cps * confidence_factor);
+            float lim_imu = fmaxf(BIAS_MIN_HEAD_CPS, 0.20f * base_cps);  // Reduced IMU
+            float lim_enc = fmaxf(BIAS_MIN_CPS, 0.30f * base_cps);
             
             line_bias = clampf(line_bias, -lim_line, lim_line);
             imu_bias = clampf(imu_bias, -lim_imu, lim_imu);
             encoder_bias = clampf(encoder_bias, -lim_enc, lim_enc);
             
-            // When line confidence is high, trust line sensor more
-            // When line confidence is low, rely more on encoders
-            float w_line = 0.65f * confidence_factor;     // 0.325 to 0.65
-            float w_enc = 0.30f * (2.0f - confidence_factor);  // 0.15 to 0.30
-            float w_imu = 0.05f;                          // Minimal IMU influence
+            // Dynamic weighting based on confidence
+            float w_line = 0.70f * confidence_factor;                   // Trust line more when confident
+            float w_enc = 0.25f * (1.5f - 0.5f * confidence_factor);  // Trust encoders less when confident
+            float w_imu = 0.05f;                                        // Minimal IMU influence
             
             // Normalize weights
             float w_total = w_line + w_enc + w_imu;
@@ -544,6 +599,7 @@ static bool main_control_cb(repeating_timer_t* t) {
                 g_state = STATE_LINE_FOLLOW;
                 g_line_lost_count = 0;
                 g_recovery_count = 0;
+                g_have_error_memory = false;
                 printf("[RESTART] Resuming from STOPPED\n");
             }
             break;
@@ -568,7 +624,7 @@ static void print_telemetry(void) {
     printf("[DEMO2] State=%s Line[err=%.2f ADC=%u det=%d conf=%.2f] "
            "Bias[line=%.1f imu=%.1f enc_diff=%.1f] "
            "IMU[hdg=%.1f° err=%.1f° w=%.2f] "
-           "Speed=%.1fcm/s Dist=%.1fcm LastBC=%s\n",
+           "Speed=%.1fcm/s Dist=%.1fcm LastBC=%s MemErr=%.2f\n",
            state_str[g_telem.state],
            g_telem.line_reading.error,
            g_telem.line_reading.raw_adc,
@@ -582,7 +638,8 @@ static void print_telemetry(void) {
            (double)g_head_weight,
            g_telem.speed_cmps,
            g_telem.distance_cm,
-           barcode_cmd_str(g_telem.last_barcode));
+           barcode_cmd_str(g_telem.last_barcode),
+           g_last_error_direction);
 }
 
 // ============================================================================
@@ -815,6 +872,7 @@ int main(void) {
     
     g_state = STATE_LINE_FOLLOW;
     g_first_run = true;
+    g_have_error_memory = false;
     running = true;
     
     print_telemetry_legend();
