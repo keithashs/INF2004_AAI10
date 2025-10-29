@@ -189,7 +189,7 @@ static void do_auto_wheel_scale(void) {
         motor_get_wheel_scale(&sr, &sl);
         printf("TRIM: scales R=%.3f L=%.3f\n", sr, sl);
     } else {
-        motor_set_wheel_scale(1.0f, 1.0f);
+        motor_set_wheel_scale(DEFAULT_SCALE_RIGHT, DEFAULT_SCALE_LEFT);
         printf("TRIM: skipped (low cps)\n");
     }
 
@@ -198,7 +198,7 @@ static void do_auto_wheel_scale(void) {
 }
 
 static void do_boot_auto_cal(void) {
-    do_mag_calibration();
+    // do_mag_calibration();
     do_auto_wheel_scale();
     motion_command(MOVE_STOP, 0);
     printf("BOOT: auto calibration complete.\n");

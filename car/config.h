@@ -52,6 +52,9 @@
 #define TICKS_PER_REV     20.0f   // 20 rising edges per wheel rev (20 slots)
 #define WHEEL_DIAMETER_M  0.0635f // 6.35 cm drive wheel (measured)
 #define PI_F              3.1415926f
+// Wheel Scale Calibration Defaults
+#define DEFAULT_SCALE_RIGHT  0.945f
+#define DEFAULT_SCALE_LEFT   1.058f
 
 // Speed scaling: 0..100% -> counts per second target
 // M1(R) peak ≈ 54 cps (≈21.21 cm/s) M2(L) peak ≈ 50 cps (≈19.63 cm/s) - on air
