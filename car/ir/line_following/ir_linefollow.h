@@ -8,8 +8,8 @@
 #define IR_LEFT_ADC   IR_LEFT_ADC_PIN        // GP28 (ADC2) for analog line detection
 
 // ===== Detection Thresholds (for 1.7cm thin line) =====
-#define IR_BLACK_THRESHOLD  1200    // ADC > 1200 = black line detected
-#define IR_WHITE_THRESHOLD  1000    // ADC < 1000 = white surface
+#define IR_BLACK_THRESHOLD  800    // ADC > 800 = black line detected
+#define IR_WHITE_THRESHOLD  800    // ADC < 800 = white surface
 
 // ===== Line Error Structure =====
 typedef struct {

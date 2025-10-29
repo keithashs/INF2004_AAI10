@@ -18,7 +18,7 @@
 // CONFIGURATION PARAMETERS
 // ============================================================================
 
-#define LINE_FOLLOW_SPEED_PCT  15       // Base speed (matches demo1 20%)
+#define LINE_FOLLOW_SPEED_PCT  10       // Base speed (matches demo1 20%)
 #define TURN_SPEED_PCT         18       // Speed during turns (slightly lower)
 #define TURN_ANGLE_90          90.0f    // LEFT/RIGHT turn angle
 #define TURN_ANGLE_180         180.0f   // U-TURN angle

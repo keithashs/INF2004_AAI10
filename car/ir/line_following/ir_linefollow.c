@@ -15,7 +15,7 @@ static int history_index = 0;
 
 // ===== Calibration values (CRITICAL: measure these on your track!) =====
 // Run calibration mode to determine these values
-static uint16_t cal_centered_adc = 1800;  // ADC when perfectly centered on line
+static uint16_t cal_centered_adc = 2000;  // ADC when perfectly centered on line
 static uint16_t cal_good_adc = 1650;      // ADC when slightly off-center
 static uint16_t cal_edge_adc = 1200;      // ADC when at edge of line (still seeing black)
 static uint16_t cal_barely_on_adc = 800; // ADC when barely touching line
@@ -72,7 +72,7 @@ line_reading_t ir_get_line_error(void) {
     reading.raw_adc = ir_read_left_adc();
     
     // Detect if line is present
-    reading.line_detected = (reading.raw_adc > IR_BLACK_THRESHOLD);
+    reading.line_detected = (reading.raw_adc >= IR_BLACK_THRESHOLD);
     
     if (!reading.line_detected) {
         // Line completely lost - maximum correction to recover
@@ -86,41 +86,41 @@ line_reading_t ir_get_line_error(void) {
     // Map ADC intensity to position error using calibrated thresholds
     
     if (reading.raw_adc >= cal_centered_adc) {
-        // ZONE 1: Well-centered on line (ADC >= 2800)
+        // ZONE 1: Well-centered on line (ADC >= 2000)
         // Small or zero error - car is tracking well
         reading.error = 0.0f;
-        reading.confidence = 1.0f;
+        reading.confidence = 0.5f;
     } 
     else if (reading.raw_adc >= cal_good_adc) {
-        // ZONE 2: Slightly off-center (2300 <= ADC < 2800)
-        // Small correction needed - linear ramp from 0 to 0.5
+        // ZONE 2: Slightly off-center (1650 ≤ ADC < 2000)
+        // Small correction needed - linear ramp 2000→1650 maps to error 0.0→0.5
         float ratio = (float)(cal_centered_adc - reading.raw_adc) / 
                       (float)(cal_centered_adc - cal_good_adc);
         reading.error = 0.5f * ratio;  // 0.0 to 0.5
         reading.confidence = 0.95f;
     } 
     else if (reading.raw_adc >= cal_edge_adc) {
-        // ZONE 3: Near edge of line (1800 <= ADC < 2300)
-        // Moderate correction - linear ramp from 0.5 to 1.3
+        // ZONE 3: Near edge of line (1200 ≤ ADC < 1650)
+        // Moderate correction - linear ramp 1650→1200 maps to error 0.5→1.3
         float ratio = (float)(cal_good_adc - reading.raw_adc) / 
                       (float)(cal_good_adc - cal_edge_adc);
-        reading.error = 0.5f + 0.8f * ratio;  // 0.5 to 1.3
+        reading.error = 0.5f + (0.8f * ratio);
         reading.confidence = 0.80f;
     } 
     else if (reading.raw_adc >= cal_barely_on_adc) {
-        // ZONE 4: Barely on line (1200 <= ADC < 1800)
-        // Strong correction needed - linear ramp from 1.3 to 2.2
+        // ZONE 4: Barely on line (800 ≤ ADC < 1200)
+        // Strong correction needed - linear ramp 1200→800 maps to error 1.3→2.2
         float ratio = (float)(cal_edge_adc - reading.raw_adc) / 
                       (float)(cal_edge_adc - cal_barely_on_adc);
-        reading.error = 1.3f + 0.9f * ratio;  // 1.3 to 2.2
+        reading.error = 1.3f + (0.9f * ratio);
         reading.confidence = 0.60f;
     } 
     else {
-        // ZONE 5: Just barely detecting line (ADC < 1200)
-        // Maximum correction - approaching line loss
+        // ZONE 5: Just barely detecting line (ADC < 1000)
+        // Maximum correction - approaching line loss 1000→threshold maps to error 2.2→3.0
         float ratio = (float)(cal_barely_on_adc - reading.raw_adc) / 
                       (float)(cal_barely_on_adc - IR_BLACK_THRESHOLD);
-        reading.error = 2.2f + 0.8f * ratio;  // 2.2 to 3.0
+        reading.error = 2.2f + (0.8f * ratio);  // 2.2 to 3.0
         reading.confidence = 0.40f;
     }
     
