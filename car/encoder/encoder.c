@@ -1,72 +1,95 @@
 #include "encoder.h"
-#include "pico/stdlib.h"
-#include "hardware/gpio.h"
-#include "hardware/irq.h"
-#include "hardware/sync.h"
-#include "config.h"   // expects ENCODER_PIN_M1 / ENCODER_PIN_M2
 
-// ----- Internal counters -----
-// Total counts (monotonic since last reset)
-static volatile uint32_t enc_tot_m1 = 0;
-static volatile uint32_t enc_tot_m2 = 0;
+static Encoder left_encoder  = { .data = {0,0}, .last = {0,0}, .mutex = NULL };
+static Encoder right_encoder = { .data = {0,0}, .last = {0,0}, .mutex = NULL };
 
-// Last snapshot used to produce "window" deltas
-static volatile uint32_t prev_tot_m1 = 0;
-static volatile uint32_t prev_tot_m2 = 0;
+void read_encoder_pulse(uint gpio, uint32_t events) {
+    Encoder *enc = NULL;
+    if (gpio == L_ENCODER_OUT)      enc = &left_encoder;
+    else if (gpio == R_ENCODER_OUT) enc = &right_encoder;
+    if (!enc) return;
 
-// Shared IRQ for both encoder pins
-static void encoder_gpio_irq(uint gpio, uint32_t events) {
-    (void)events;
-    if (gpio == ENCODER_PIN_M1) {
-        enc_tot_m1++;
-    } else if (gpio == ENCODER_PIN_M2) {
-        enc_tot_m2++;
+    BaseType_t hpw = pdFALSE;
+    if (xSemaphoreTakeFromISR(enc->mutex, &hpw) == pdTRUE) {
+        enc->last = enc->data;
+        enc->data.pulse_count++;
+        enc->data.timestamp_us = time_us_64();
+        xSemaphoreGiveFromISR(enc->mutex, &hpw);
+    }
+    portYIELD_FROM_ISR(hpw);
+}
+
+static inline float distance_cm_from_pulses(uint32_t pulses) {
+    const float dpp = WHEEL_CIRCUMFERENCE / PULSES_PER_REVOLUTION;
+    return dpp * (float)pulses;
+}
+
+static float get_distance_from(Encoder *enc) {
+    float d = 0.f;
+    if (xSemaphoreTake(enc->mutex, portMAX_DELAY) == pdTRUE) {
+        d = distance_cm_from_pulses(enc->data.pulse_count);
+        xSemaphoreGive(enc->mutex);
+    }
+    return d;
+}
+
+float get_left_distance(void)   { return get_distance_from(&left_encoder); }
+float get_right_distance(void)  { return get_distance_from(&right_encoder); }
+float get_average_distance(void){ return 0.5f*(get_left_distance()+get_right_distance()); }
+
+static float get_speed_from(Encoder *enc) {
+    float v = INVALID_SPEED;
+    if (xSemaphoreTake(enc->mutex, portMAX_DELAY) == pdTRUE) {
+        const EncoderData now = enc->data;
+        const EncoderData last= enc->last;
+        xSemaphoreGive(enc->mutex);
+
+        const float dp = (float)(now.pulse_count - last.pulse_count);
+        const float dt = (float)((int64_t)now.timestamp_us - (int64_t)last.timestamp_us) / 1e6f;
+        const float age= (float)(time_us_64() - now.timestamp_us) / 1e6f;
+
+        if (dt > 0.f && age < 1.0f && dp > 0.f) {
+            v = distance_cm_from_pulses((uint32_t)dp) / dt; // cm/s
+        }
+    }
+    return v;
+}
+
+float get_left_speed(void)   { return get_speed_from(&left_encoder); }
+float get_right_speed(void)  { return get_speed_from(&right_encoder); }
+float get_average_speed(void){
+    float vl = get_left_speed(), vr = get_right_speed();
+    if (vl <= INVALID_SPEED || vr <= INVALID_SPEED) return INVALID_SPEED;
+    return 0.5f*(vl+vr);
+}
+
+static void reset_one(Encoder *enc) {
+    if (xSemaphoreTake(enc->mutex, portMAX_DELAY) == pdTRUE) {
+        enc->data.pulse_count = 0;
+        enc->data.timestamp_us = 0;
+        enc->last = enc->data;
+        xSemaphoreGive(enc->mutex);
     }
 }
 
+void reset_left_encoder(void)  { reset_one(&left_encoder); }
+void reset_right_encoder(void) { reset_one(&right_encoder); }
+void reset_encoders(void)      { reset_one(&left_encoder); reset_one(&right_encoder); }
+
 void encoder_init(void) {
-    // Configure as inputs with pull-ups (common for reflective encoders)
-    gpio_init(ENCODER_PIN_M1);
-    gpio_set_dir(ENCODER_PIN_M1, GPIO_IN);
-    gpio_pull_up(ENCODER_PIN_M1);
+    gpio_init(L_ENCODER_POW); gpio_set_dir(L_ENCODER_POW, GPIO_OUT);
+    gpio_init(L_ENCODER_OUT); gpio_set_dir(L_ENCODER_OUT, GPIO_IN); gpio_pull_up(L_ENCODER_OUT);
 
-    gpio_init(ENCODER_PIN_M2);
-    gpio_set_dir(ENCODER_PIN_M2, GPIO_IN);
-    gpio_pull_up(ENCODER_PIN_M2);
+    gpio_init(R_ENCODER_POW); gpio_set_dir(R_ENCODER_POW, GPIO_OUT);
+    gpio_init(R_ENCODER_OUT); gpio_set_dir(R_ENCODER_OUT, GPIO_IN); gpio_pull_up(R_ENCODER_OUT);
 
-    // Reset counters
-    uint32_t s = save_and_disable_interrupts();
-    enc_tot_m1 = enc_tot_m2 = 0;
-    prev_tot_m1 = prev_tot_m2 = 0;
-    restore_interrupts(s);
+    gpio_put(L_ENCODER_POW, 1);
+    gpio_put(R_ENCODER_POW, 1);
 
-    // Enable IRQ on both edges to count stripes
-    gpio_set_irq_enabled_with_callback(ENCODER_PIN_M1,
-        GPIO_IRQ_EDGE_RISE, true, &encoder_gpio_irq);
-    gpio_set_irq_enabled(ENCODER_PIN_M2, GPIO_IRQ_EDGE_RISE, true);
+    left_encoder.mutex  = xSemaphoreCreateMutex();
+    right_encoder.mutex = xSemaphoreCreateMutex();
+
+    // Register the common ISR once; enable it for both pins.
+    gpio_set_irq_enabled_with_callback(L_ENCODER_OUT, GPIO_IRQ_EDGE_RISE, true, &read_encoder_pulse);
+    gpio_set_irq_enabled(R_ENCODER_OUT, GPIO_IRQ_EDGE_RISE, true);
 }
-
-void encoder_reset_all(void) {
-    uint32_t s = save_and_disable_interrupts();
-    enc_tot_m1 = enc_tot_m2 = 0;
-    prev_tot_m1 = prev_tot_m2 = 0;
-    restore_interrupts(s);
-}
-
-void encoder_sample_window(uint16_t *win_m1, uint16_t *win_m2) {
-    // Compute deltas since last sample (IRQ-safe)
-    uint32_t s = save_and_disable_interrupts();
-    uint32_t cur_m1 = enc_tot_m1;
-    uint32_t cur_m2 = enc_tot_m2;
-    uint32_t d1 = cur_m1 - prev_tot_m1;
-    uint32_t d2 = cur_m2 - prev_tot_m2;
-    prev_tot_m1 = cur_m1;
-    prev_tot_m2 = cur_m2;
-    restore_interrupts(s);
-
-    if (win_m1) *win_m1 = (uint16_t)d1;
-    if (win_m2) *win_m2 = (uint16_t)d2;
-}
-
-uint32_t encoder_total_m1(void) { return enc_tot_m1; }
-uint32_t encoder_total_m2(void) { return enc_tot_m2; }

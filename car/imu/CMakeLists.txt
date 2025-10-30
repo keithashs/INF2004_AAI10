@@ -1,14 +1,16 @@
-add_library(imu_lib imu.c)
+cmake_minimum_required(VERSION 3.13)
 
-target_include_directories(imu_lib PUBLIC
-    ${CMAKE_CURRENT_LIST_DIR}           # imu/
-    ${CMAKE_CURRENT_LIST_DIR}/..
-    ${CMAKE_CURRENT_LIST_DIR}/../main
+add_library(imu_lib
+    imu.c
 )
 
+# Public headers live in this folder
+target_include_directories(imu_lib PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+# Link Pico SDK libs needed by this module
 target_link_libraries(imu_lib
     pico_stdlib
     hardware_i2c
-    hardware_adc            # keep if you read any ADC in IMU code; harmless otherwise
-    hardware_gpio
 )

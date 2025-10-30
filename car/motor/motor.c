@@ -1,412 +1,181 @@
-// motor.c - Enhanced with adaptive scaling
 #include "motor.h"
-#include "pico/stdlib.h"
-#include "pico/time.h"
-#include "hardware/pwm.h"
-#include "hardware/irq.h"
-#include <stdio.h>
-#include <math.h>
-#include "pid/pid.h"
-#include "config.h"
-#include "encoder/encoder.h"
-#include "imu/imu.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "encoder.h"   // for distances/speeds used by PID task
 
-// --- Targets & state ---
-static volatile float tgt_cps_m1 = 0.0f, tgt_cps_m2 = 0.0f;
-static volatile int dir_m1 = 0, dir_m2 = 0;
-static volatile float duty_m1 = 0.0f, duty_m2 = 0.0f;
-static volatile uint64_t last_telemetry_ms = 0;
+// =================== Config tweaks ===================
+#define RIGHT_INVERTED 0
 
-// Odometry/reporting correction
-static const float ODOM_CORR = 1.067f;
+#ifndef PWM_TOP
+#define PWM_TOP ((PWM_MAX_LEFT > PWM_MAX_RIGHT) ? PWM_MAX_LEFT : PWM_MAX_RIGHT)
+#endif
 
-// -------- CPS smoothing: 100 ms moving average --------
-#define CPS_AVG_TAPS 10
-static uint16_t win_hist_m1[CPS_AVG_TAPS] = {0};
-static uint16_t win_hist_m2[CPS_AVG_TAPS] = {0};
-static uint32_t win_sum_m1 = 0, win_sum_m2 = 0;
-static int      win_idx = 0;
+static bool     use_pid_control = false;
+static PIDState pid_state       = PID_DISABLED;
+static float    target_speed    = MIN_SPEED;
+static float    target_turn_angle = CONTINUOUS_TURN;
 
-// Extra low-pass after the 100ms average
-static float cps_m1_f = 0.0f, cps_m2_f = 0.0f;
-static const float CPS_ALPHA = 0.70f;
+// ---------- helpers ----------
+static inline void set_pwm(uint gpio, uint16_t level){ pwm_set_gpio_level(gpio, level); }
+static inline uint16_t clampL(float v){ if(v<PWM_MIN_LEFT)v=PWM_MIN_LEFT; if(v>PWM_MAX_LEFT)v=PWM_MAX_LEFT; return (uint16_t)v; }
+static inline uint16_t clampR(float v){ if(v<PWM_MIN_RIGHT)v=PWM_MIN_RIGHT; if(v>PWM_MAX_RIGHT)v=PWM_MAX_RIGHT; return (uint16_t)v; }
 
-// PID controllers
-static PID pid_m1 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
-static PID pid_m2 = { .kp=0.25f, .ki=2.0f, .kd=0.002f, .integ=0, .prev_err=0, .out_min=0.0f, .out_max=100.0f };
+// Left raw
+static inline void L_fwd(uint16_t p){ set_pwm(L_MOTOR_IN1,p); set_pwm(L_MOTOR_IN2,0); }
+static inline void L_rev(uint16_t p){ set_pwm(L_MOTOR_IN1,0); set_pwm(L_MOTOR_IN2,p); }
 
-// Per-wheel scale
-static volatile float scale_right = 1.0f;
-static volatile float scale_left  = 1.0f;
+// Right raw (optionally inverted)
+#if RIGHT_INVERTED
+static inline void R_fwd(uint16_t p){ set_pwm(R_MOTOR_IN3,0); set_pwm(R_MOTOR_IN4,p); }
+static inline void R_rev(uint16_t p){ set_pwm(R_MOTOR_IN3,p); set_pwm(R_MOTOR_IN4,0); }
+#else
+static inline void R_fwd(uint16_t p){ set_pwm(R_MOTOR_IN3,p); set_pwm(R_MOTOR_IN4,0); }
+static inline void R_rev(uint16_t p){ set_pwm(R_MOTOR_IN3,0); set_pwm(R_MOTOR_IN4,p); }
+#endif
 
-// Adaptive scale state
-static float diff_lp = 0.0f;         // low-pass of encoder cps difference
-static float adapt_accum = 0.0f;     // period accumulator for scale updates
+static void coast(void){ set_pwm(L_MOTOR_IN1,0); set_pwm(L_MOTOR_IN2,0); set_pwm(R_MOTOR_IN3,0); set_pwm(R_MOTOR_IN4,0); }
 
-// Telemetry mode
-static telemetry_mode_t tmode = TMODE_NONE;
+// ---------- API (manual/PID-neutral) ----------
+void forward_motor(float pl, float pr){ L_fwd(clampL(pl)); R_fwd(clampR(pr)); }
+void reverse_motor(float pl, float pr){ L_rev(clampL(pl)); R_rev(clampR(pr)); }
 
-// ------------- Helpers -------------
-static inline uint16_t duty_from_percent(float pct) {
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    return (uint16_t)((pct * PWM_WRAP) / 100.0f);
+void turn_motor(int direction, float pl, float pr){
+    uint16_t L = clampL(pl), R = clampR(pr);
+    if (direction == 0/*LEFT*/)  { L_rev(L); R_fwd(R); }
+    else                         { L_fwd(L); R_rev(R); }
 }
 
-static void setup_pwm(uint gpio) {
-    gpio_set_function(gpio, GPIO_FUNC_PWM);
-    uint slice = pwm_gpio_to_slice_num(gpio);
-    pwm_config cfg = pwm_get_default_config();
-    float clkdiv = (float)SYS_CLK_HZ / ((float)PWM_FREQ_HZ * (float)(PWM_WRAP + 1));
-    pwm_config_set_clkdiv(&cfg, clkdiv);
-    pwm_config_set_wrap(&cfg, PWM_WRAP);
-    pwm_init(slice, &cfg, true);
-    uint channel = pwm_gpio_to_channel(gpio);
-    pwm_set_chan_level(slice, channel, 0);
-}
+void stop_motor(void){ coast(); }
 
-void motor_set_signed(int in1, int in2, int dir, float duty_percent) {
-    uint slice1 = pwm_gpio_to_slice_num(in1);
-    uint chan1  = pwm_gpio_to_channel(in1);
-    uint slice2 = pwm_gpio_to_slice_num(in2);
-    uint chan2  = pwm_gpio_to_channel(in2);
-    uint16_t d = duty_from_percent(duty_percent);
+// ---------- Friendly wrappers ----------
+void disable_pid_control(void){ use_pid_control = false; }
+void forward_motor_manual(float pl,float pr){ disable_pid_control(); forward_motor(pl,pr); }
+void reverse_motor_manual(float pl,float pr){ disable_pid_control(); reverse_motor(pl,pr); }
 
-    if (dir > 0) { 
-        pwm_set_chan_level(slice1, chan1, d); 
-        pwm_set_chan_level(slice2, chan2, 0); 
-    } else if (dir < 0) { 
-        pwm_set_chan_level(slice1, chan1, 0); 
-        pwm_set_chan_level(slice2, chan2, d); 
-    } else { 
-        pwm_set_chan_level(slice1, chan1, 0); 
-        pwm_set_chan_level(slice2, chan2, 0); 
-    }
-}
-
-void motor_all_stop(void) {
-    motor_set_signed(M1_IN1, M1_IN2, 0, 0);
-    motor_set_signed(M2_IN1, M2_IN2, 0, 0);
-}
-
-static inline float pct_to_cps(int percent) {
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
-    return (MAX_CPS * (float)percent) / 100.0f;
-}
-
-void motor_set_wheel_scale(float sr, float sl) { 
-    scale_right = sr; 
-    scale_left = sl; 
-}
-
-void motor_get_wheel_scale(float* sr, float* sl) { 
-    if (sr) *sr = scale_right; 
-    if (sl) *sl = scale_left; 
-}
-
-// ===== NEW: Calibrate wheel scale from measured ratio =====
-void motor_calibrate_wheel_scale(float r_avg, float l_avg) {
-    float k  = r_avg / l_avg;
-    float sr = 1.0f / sqrtf(k);
-    float sl = sqrtf(k);
-
-    // Clamp to safe bounds
-    sr = clampf(sr, SCALE_MIN, SCALE_MAX);
-    sl = clampf(sl, SCALE_MIN, SCALE_MAX);
-
-    motor_set_wheel_scale(sr, sl);
-}
-
-// ===== NEW: Adaptive wheel scaling update =====
-void motor_update_adaptive_scale(float diff_meas, float dt, float base_cps) {
-    // Low-pass the encoder difference
-    diff_lp = 0.98f * diff_lp + 0.02f * diff_meas;
-    adapt_accum += dt;
-
-    if (adapt_accum >= ADAPT_PERIOD_S && base_cps > 5.0f) {
-        float sr = scale_right;
-        float sl = scale_left;
-
-        // Adjust scales based on persistent difference
-        float rel = diff_lp / (base_cps + 1e-6f);
-        float dscale = clampf(-ADAPT_GAIN * rel, -0.01f, 0.01f);
-        
-        sr += dscale;
-        sl -= dscale;
-
-        // Keep within safety bounds
-        sr = clampf(sr, SCALE_MIN, SCALE_MAX);
-        sl = clampf(sl, SCALE_MIN, SCALE_MAX);
-        
-        motor_set_wheel_scale(sr, sl);
-
-        printf("TRIM: adapt scales R=%.3f L=%.3f (diff_lp=%.2f cps)\n", sr, sl, diff_lp);
-
-        adapt_accum = 0.0f;
-    }
-}
-
-// ===== NEW: Reset adaptive scaling state =====
-void motor_reset_adaptive_scale(void) {
-    diff_lp = 0.0f;
-    adapt_accum = 0.0f;
-}
-
-void motion_command(move_t move, int speed_percent) {
-    motion_command_with_bias(move, speed_percent, 0.0f, 0.0f);
-}
-
-void motion_command_with_bias(move_t move, int speed_percent, float left_bias_cps, float right_bias_cps) {
-    float cps = pct_to_cps(speed_percent);
-    
-    switch (move) {
-        case MOVE_FORWARD:
-            dir_m1 = +1; dir_m2 = +1;
-            tgt_cps_m1 = (cps + right_bias_cps) * scale_right;
-            tgt_cps_m2 = (cps + left_bias_cps)  * scale_left;
-            break;
-            
-        case MOVE_BACKWARD:
-            dir_m1 = -1; dir_m2 = -1;
-            tgt_cps_m1 = (cps + right_bias_cps) * scale_right;
-            tgt_cps_m2 = (cps + left_bias_cps)  * scale_left;
-            break;
-            
-        case MOVE_LEFT:
-            dir_m1 = +1; dir_m2 = -1; 
-            tgt_cps_m1 = cps; 
-            tgt_cps_m2 = cps; 
-            break;
-            
-        case MOVE_RIGHT:
-            dir_m1 = -1; dir_m2 = +1; 
-            tgt_cps_m1 = cps; 
-            tgt_cps_m2 = cps; 
-            break;
-            
-        case MOVE_STOP:
-        default:
-            dir_m1 = 0;  
-            dir_m2 = 0;  
-            tgt_cps_m1 = 0; 
-            tgt_cps_m2 = 0; 
-            break;
-    }
-}
-
-void motor_init(void) {
-    setup_pwm(M1_IN1); 
-    setup_pwm(M1_IN2);
-    setup_pwm(M2_IN1); 
-    setup_pwm(M2_IN2);
-
-    encoder_init();
-
-    pid_reset(&pid_m1); 
-    pid_reset(&pid_m2);
-
-    for (int i = 0; i < CPS_AVG_TAPS; ++i) { 
-        win_hist_m1[i] = 0; 
-        win_hist_m2[i] = 0; 
-    }
-    
-    win_sum_m1 = win_sum_m2 = 0; 
-    win_idx = 0;
-    cps_m1_f = cps_m2_f = 0.0f;
-    scale_right = 1.0f; 
-    scale_left = 1.0f;
-
-    // Reset adaptive state
-    motor_reset_adaptive_scale();
-
-    // Prime the window sampler
-    uint16_t dump1, dump2;
-    encoder_sample_window(&dump1, &dump2);
-}
-
-void motor_reset_speed_filters(void) {
-    for (int i = 0; i < CPS_AVG_TAPS; ++i) { 
-        win_hist_m1[i] = 0; 
-        win_hist_m2[i] = 0; 
-    }
-    win_sum_m1 = win_sum_m2 = 0; 
-    win_idx = 0;
-    cps_m1_f = cps_m2_f = 0.0f;
-
-    uint16_t dump1, dump2;
-    encoder_sample_window(&dump1, &dump2);
-}
-
-void motor_reset_controllers(void) {
-    pid_reset(&pid_m1); 
-    pid_reset(&pid_m2);
-}
-
-void motor_reset_distance_counters(void) {
-    encoder_reset_all();
-    motor_reset_speed_filters();
-}
-
-void telemetry_set_mode(telemetry_mode_t mode) {
-    tmode = mode;
-}
-
-bool motor_control_timer_cb(repeating_timer_t *t) {
-    const float dt = CONTROL_PERIOD_MS / 1000.0f;
-
-    // Get encoder ticks
-    uint16_t w1 = 0, w2 = 0;
-    encoder_sample_window(&w1, &w2);
-
-    // 100 ms moving average
-    win_sum_m1 -= win_hist_m1[win_idx];
-    win_sum_m2 -= win_hist_m2[win_idx];
-    win_hist_m1[win_idx] = w1;
-    win_hist_m2[win_idx] = w2;
-    win_sum_m1 += win_hist_m1[win_idx];
-    win_sum_m2 += win_hist_m2[win_idx];
-    win_idx = (win_idx + 1) % CPS_AVG_TAPS;
-
-    float cps_m1_raw = (float)win_sum_m1 / (CPS_AVG_TAPS * dt);
-    float cps_m2_raw = (float)win_sum_m2 / (CPS_AVG_TAPS * dt);
-
-    // Extra IIR smoothing
-    cps_m1_f = CPS_ALPHA * cps_m1_f + (1.0f - CPS_ALPHA) * cps_m1_raw;
-    cps_m2_f = CPS_ALPHA * cps_m2_f + (1.0f - CPS_ALPHA) * cps_m2_raw;
-
-    // PID control
-    float out1 = pid_step(&pid_m1, tgt_cps_m1, cps_m1_f, dt);
-    float out2 = pid_step(&pid_m2, tgt_cps_m2, cps_m2_f, dt);
-    duty_m1 = out1; 
-    duty_m2 = out2;
-
-    motor_set_signed(M1_IN1, M1_IN2, dir_m1, duty_m1);
-    motor_set_signed(M2_IN1, M2_IN2, dir_m2, duty_m2);
-
-    // ---- Telemetry (5 Hz) ----
-    uint64_t now_ms = to_ms_since_boot(get_absolute_time());
-    if (now_ms - last_telemetry_ms >= TELEMETRY_MS) {
-        last_telemetry_ms = now_ms;
-
-        // Distances
-        uint32_t tot_m1 = encoder_total_m1();
-        uint32_t tot_m2 = encoder_total_m2();
-        float revs_m1 = (float)tot_m1 / TICKS_PER_REV;
-        float revs_m2 = (float)tot_m2 / TICKS_PER_REV;
-        float circ_m  = PI_F * WHEEL_DIAMETER_M;
-        float dist_m1 = (revs_m1 * circ_m) * ODOM_CORR;
-        float dist_m2 = (revs_m2 * circ_m) * ODOM_CORR;
-
-        // Speeds
-        float m1_cmps     = (cps_m1_raw / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
-        float m2_cmps     = (cps_m2_raw / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
-        float tgt_m1_cmps = (tgt_cps_m1  / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
-        float tgt_m2_cmps = (tgt_cps_m2  / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
-
-        imu_state_t s = g_imu_last;
-        float err  = g_heading_err_deg;
-        float bias = g_bias_cps;
-        bool  iok  = g_imu_ok;
-
-        if (tmode == TMODE_RUN) {
-            printf("STAT "
-                   "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-                   "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-                   "Dist[L=%7.1fcm R=%7.1fcm]   "
-                   "IMU[err=%6.1f roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f bias=%6.1f w=%4.2f%s]\n",
-                   m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
-                   m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
-                   dist_m2 * 100.0f, dist_m1 * 100.0f,
-                   iok ? err : 0.0f,
-                   iok ? s.roll_deg  : 0.0f,
-                   iok ? s.pitch_deg : 0.0f,
-                   iok ? s.heading_deg      : 0.0f,
-                   iok ? s.heading_deg_filt : 0.0f,
-                   iok ? bias : 0.0f,
-                   (double)g_head_weight,
-                   iok ? "" : " IMU=NA");
-        } else if (tmode == TMODE_CAL) {
-            if (iok) {
-                printf("CAL "
-                       "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-                       "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-                       "IMU[roll=%6.1f pitch=%6.1f head=%6.1f filt=%6.1f err=%6.1f bias=%6.1f w=%4.2f]\n",
-                       m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
-                       m2_cmps, tgt_m2_cmps, duty_m2, dir_m2,
-                       s.roll_deg, s.pitch_deg, s.heading_deg, s.heading_deg_filt, err, bias, (double)g_head_weight);
-            } else {
-                printf("CAL "
-                       "M1[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]  "
-                       "M2[speed=%6.2fcm/s tgt=%6.2fcm/s duty=%6.1f%% dir=%2d]\n",
-                       m1_cmps, tgt_m1_cmps, duty_m1, dir_m1,
-                       m2_cmps, tgt_m2_cmps, duty_m2, dir_m2);
-            }
-        }
-    }
+bool turn_until_angle(float angle){
+    if (angle == CONTINUOUS_TURN) return true;
+    if (angle < 0.f || angle > FULL_CIRCLE) return false;
+    const float target = (angle / FULL_CIRCLE) * (3.14159265358979323846f * WHEEL_TO_WHEEL_DISTANCE);
+    if (target - get_average_distance() <= 0.05f) { stop_motor(); return false; }
     return true;
 }
 
-// ----- Helpers -----
-void get_cps(float* out_cps_m1, float* out_cps_m2) {
-    const float dt = CONTROL_PERIOD_MS / 1000.0f;
-    uint16_t w1 = 0, w2 = 0;
-    encoder_sample_window(&w1, &w2);
-    if (out_cps_m1) *out_cps_m1 = (float)w1 / dt;
-    if (out_cps_m2) *out_cps_m2 = (float)w2 / dt;
+void turn_motor_manual(int direction, float angle, float pl,float pr){
+    disable_pid_control();
+    turn_motor(direction, pl, pr);
+    if (angle != CONTINUOUS_TURN) {
+        reset_encoders();
+        while (turn_until_angle(angle)) { vTaskDelay(pdMS_TO_TICKS(10)); }
+    }
+}
+void stop_motor_manual(void){ disable_pid_control(); stop_motor(); }
+
+void offset_move_motor(int direction, int turn, float offset){
+    if (offset < 0.f) offset = 0.f;
+    if (offset > 1.f) offset = 1.f;
+    int pl = PWM_MID_LEFT, pr = PWM_MID_RIGHT;
+    int lspan = (PWM_MAX_LEFT  - PWM_MIN_LEFT )/2;
+    int rspan = (PWM_MAX_RIGHT - PWM_MIN_RIGHT)/2;
+
+    if (turn == 0/*LEFT*/) { pl -= lspan*offset; pr += rspan*offset; }
+    else                   { pl += lspan*offset; pr -= rspan*offset; }
+
+    if (direction == 1/*FORWARDS*/) forward_motor_manual(pl,pr);
+    else                            reverse_motor_manual(pl,pr);
 }
 
-void get_cps_smoothed(float* out_m1, float* out_m2) {
-    if (out_m1) *out_m1 = cps_m1_f;
-    if (out_m2) *out_m2 = cps_m2_f;
+// ---------- PID interface (optional) ----------
+void enable_pid_control(void){ use_pid_control = true; }
+void forward_motor_pid(float s){ enable_pid_control(); target_speed = s; pid_state = PID_FWD; }
+void reverse_motor_pid(float s){ enable_pid_control(); target_speed = s; pid_state = PID_REV; }
+void turn_motor_pid(int dir,float s,float ang){ enable_pid_control(); target_speed=s; target_turn_angle=ang; pid_state = (dir==0)?PID_LEFT:PID_RIGHT; }
+void stop_motor_pid(void){ disable_pid_control(); stop_motor(); target_speed=0.f; pid_state=PID_STOP; enable_pid_control(); }
+
+// tiny PID util (kept same signature you used elsewhere)
+float compute_pid_pwm(float target, float current, float *I, float *prev){
+    const float Kp=0.f, Ki=0.f, Kd=0.f; // keep zero unless you tune
+    float e = target - current; *I += e; float d = e - *prev; *prev = e;
+    return Kp*e + Ki*(*I) + Kd*d;
 }
 
-void get_distance_m(float* d_m1, float* d_m2) {
-    float circ_m  = PI_F * WHEEL_DIAMETER_M;
-    uint32_t tot_m1 = encoder_total_m1();
-    uint32_t tot_m2 = encoder_total_m2();
-    if (d_m1) *d_m1 = ((float)tot_m1 / TICKS_PER_REV) * circ_m;
-    if (d_m2) *d_m2 = ((float)tot_m2 / TICKS_PER_REV) * circ_m;
+// Example PID task (yields if disabled)
+void pid_task(void *params){
+    float iL=0.f,iR=0.f, eL=0.f,eR=0.f;
+    float pwmL=PWM_MIN_LEFT, pwmR=PWM_MIN_RIGHT;
+    bool jumpstarted=false;
+
+    for(;;){
+            if(!use_pid_control){ vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+
+        if (target_speed < MIN_SPEED) pid_state = PID_STOP;
+        if (target_speed > MAX_SPEED) target_speed = MAX_SPEED;
+
+        float vL = get_left_speed();
+        float vR = get_right_speed();
+
+        // simple straightness trim from speed mismatch
+        float trim = 0.10f * (vR - vL);
+        pwmL += trim; pwmR -= trim;
+
+        pwmL += compute_pid_pwm(target_speed, vL, &iL, &eL);
+        pwmR += compute_pid_pwm(target_speed, vR, &iR, &eR);
+
+        if (vL < JUMPSTART_SPEED_THRESHOLD || vR < JUMPSTART_SPEED_THRESHOLD){
+            pwmL = PWM_JUMPSTART; pwmR = PWM_JUMPSTART; jumpstarted = true;
+        } else {
+            if (pwmL < PWM_MIN_LEFT || jumpstarted)  pwmL = PWM_MIN_LEFT;
+            else if (pwmL > PWM_MAX_LEFT)            pwmL = PWM_MAX_LEFT;
+
+            if (pwmR < PWM_MIN_RIGHT || jumpstarted) pwmR = PWM_MIN_RIGHT;
+            else if (pwmR > PWM_MAX_RIGHT)           pwmR = PWM_MAX_RIGHT;
+
+            jumpstarted = false;
+        }
+
+        switch (pid_state){
+            case PID_FWD:     forward_motor(pwmL,pwmR); break;
+            case PID_REV:     reverse_motor(pwmL,pwmR); break;
+            case PID_LEFT:    turn_motor(0,pwmL,pwmR); reset_encoders(); pid_state = PID_TURNING; break;
+            case PID_RIGHT:   turn_motor(1,pwmL,pwmR); reset_encoders(); pid_state = PID_TURNING; break;
+            case PID_TURNING: turn_until_angle(target_turn_angle); break;
+            case PID_STOP:    stop_motor(); break;
+            case PID_DISABLED:
+            default:          disable_pid_control(); break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
-int get_dir_m1(void) { return dir_m1; }
-int get_dir_m2(void) { return dir_m2; }
+// ---------- hardware init ----------
+void motor_pwm_init(void){
+    gpio_set_function(L_MOTOR_IN1, GPIO_FUNC_PWM);
+    gpio_set_function(L_MOTOR_IN2, GPIO_FUNC_PWM);
+    gpio_set_function(R_MOTOR_IN3, GPIO_FUNC_PWM);
+    gpio_set_function(R_MOTOR_IN4, GPIO_FUNC_PWM);
 
-void print_telemetry_legend(void) {
-    printf("\nLEGEND:\n");
-    printf("STAT M1[speed cm/s  tgt cm/s  duty %%  dir]  "
-           "M2[speed cm/s  tgt cm/s  duty %%  dir]  "
-           "Dist[L cm R cm]  "
-           "IMU[err deg roll deg pitch deg head deg filt deg bias cps w]\n");
-    printf("Notes: bias>0 speeds LEFT up and RIGHT down; w is IMU trust 0..1.\n\n");
+    uint slices[4] = {
+        pwm_gpio_to_slice_num(L_MOTOR_IN1),
+        pwm_gpio_to_slice_num(L_MOTOR_IN2),
+        pwm_gpio_to_slice_num(R_MOTOR_IN3),
+        pwm_gpio_to_slice_num(R_MOTOR_IN4)
+    };
+    for (int i=0;i<4;i++){ pwm_set_wrap(slices[i], PWM_TOP); pwm_set_clkdiv(slices[i], 125); pwm_set_enabled(slices[i], true); }
+
+    coast();
 }
 
-// Demo2 helpers
-void get_speed_cmps(float* left_cmps, float* right_cmps) {
-    float circ_m = PI_F * WHEEL_DIAMETER_M;
-    float cps_r, cps_l;
-    get_cps_smoothed(&cps_r, &cps_l);
-    
-    if (right_cmps) *right_cmps = (cps_r / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
-    if (left_cmps)  *left_cmps  = (cps_l / TICKS_PER_REV) * circ_m * 100.0f * ODOM_CORR;
+void motor_init(void){
+#ifdef MOTOR_STBY
+    gpio_init(MOTOR_STBY); gpio_set_dir(MOTOR_STBY, GPIO_OUT); gpio_put(MOTOR_STBY, 1);
+#endif
+    motor_pwm_init();
+    xTaskCreate(pid_task, "PID Task", configMINIMAL_STACK_SIZE * 4, NULL, tskIDLE_PRIORITY + 1, NULL);
 }
 
-void get_distance_cm(float* left_cm, float* right_cm) {
-    float d_r_m, d_l_m;
-    get_distance_m(&d_r_m, &d_l_m);
-    
-    if (right_cm) *right_cm = d_r_m * 100.0f * ODOM_CORR;
-    if (left_cm)  *left_cm  = d_l_m * 100.0f * ODOM_CORR;
-}
-
-float get_average_speed_cmps(void) {
-    float left, right;
-    get_speed_cmps(&left, &right);
-    return (left + right) / 2.0f;
-}
-
-float get_average_distance_cm(void) {
-    float left, right;
-    get_distance_cm(&left, &right);
-    return (left + right) / 2.0f;
+void motor_conditioning(void){
+    printf("[MOTOR] conditioning...\n");
+    stop_motor(); forward_motor(PWM_JUMPSTART, PWM_JUMPSTART); sleep_ms(15000);
+    reverse_motor(PWM_JUMPSTART, PWM_JUMPSTART); sleep_ms(15000);
+    stop_motor(); printf("[MOTOR] conditioning complete\n");
 }
