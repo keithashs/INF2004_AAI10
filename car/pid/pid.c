@@ -20,14 +20,14 @@ float pid_step(PID* pid, float setpoint, float measured, float dt_s) {
 // === App-level PID instances (owned here so main.c stays clean) ===
 // 1) Wheel-balance (encoder-difference) PID: keeps cps_R ~ cps_L (fast)
 PID pid_track = {
-    .kp = 0.90f, .ki = 1.80f, .kd = 0.00f,
+    .kp = 6.0f, .ki = 0.80f, .kd = 0.00f,
     .integ = 0, .prev_err = 0,
-    .out_min = -100.0f, .out_max = +100.0f
+    .out_min = 0.0f, .out_max = 255.0f
 };
 
 // 2) IMU heading PID (slow trim)
 PID pid_heading = {
-    .kp = 0.35f, .ki = 0.04f, .kd = 0.00f,
+    .kp = 0.30f, .ki = 0.0f, .kd = 0.18f,
     .integ = 0, .prev_err = 0,
     .out_min = -100.0f, .out_max = +100.0f
 };

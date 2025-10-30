@@ -19,7 +19,7 @@
 // ============================================================================
 
 #define LINE_FOLLOW_SPEED_PCT  10       // Base speed (matches demo1 20%)
-#define TURN_SPEED_PCT         18       // Speed during turns (slightly lower)
+#define TURN_SPEED_PCT         10       // Speed during turns (slightly lower)
 #define TURN_ANGLE_90          90.0f    // LEFT/RIGHT turn angle
 #define TURN_ANGLE_180         180.0f   // U-TURN angle
 #define TURN_TOLERANCE_DEG     5.0f     // Turn completion threshold (±5°)
@@ -46,7 +46,7 @@
 // Line loss recovery
 #define LINE_LOST_COUNT_MAX    30      // 0.3s of no line = lost (100Hz * 0.3s)
 #define LINE_RECOVERY_TIMEOUT  500      // 5.0s max recovery attempt
-#define RECOVERY_SPEED_PCT     15       // Slow speed during recovery
+#define RECOVERY_SPEED_PCT     10       // Slow speed during recovery
 
 // Barcode detection safety
 #define BARCODE_MIN_INTERVAL_MS  3000   // 3 seconds between barcode actions
@@ -294,14 +294,14 @@ static bool reacquire_line(line_reading_t *reading) {
 // LINE LOSS RECOVERY (with directional memory)
 // ============================================================================
 static bool attempt_line_recovery(line_reading_t *reading) {
-    static bool recovery_phase = 0;  // 0=reverse, 1=sweep
+    // static bool recovery_phase = 0;  // 0=reverse, 1=sweep
     
     g_recovery_count++;
     
     // Check if line reacquired with good confidence
     if (reading->line_detected && reading->confidence > 0.7f) {
         g_recovery_count = 0;
-        recovery_phase = 0;
+        // recovery_phase = 0;
         printf("[RECOVERY] Line reacquired (ADC=%u)\n", reading->raw_adc);
         return true;
     }
@@ -318,7 +318,7 @@ static bool attempt_line_recovery(line_reading_t *reading) {
         if (g_recovery_count == 100) {
             printf("[RECOVERY] Phase 2: Sweeping based on last error=%.2f\n", 
                    g_last_error_direction);
-            recovery_phase = 1;
+            // recovery_phase = 1;
         }
         
         // Use error memory for intelligent sweep
@@ -344,7 +344,7 @@ static bool attempt_line_recovery(line_reading_t *reading) {
     if (g_recovery_count > LINE_RECOVERY_TIMEOUT) {
         printf("[RECOVERY] Failed after %lu iterations - line not found\n", g_recovery_count);
         g_recovery_count = 0;
-        recovery_phase = 0;
+        // recovery_phase = 0;
         return false;
     }
     
