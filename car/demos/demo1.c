@@ -263,12 +263,12 @@ static void system_init(void) {
     add_repeating_timer_ms(-CONTROL_PERIOD_MS, control_cb, (void*)&running, &control_timer_imu);
 
     // Optional Wi-Fi connection
-    bool wifi_ok = wifi_try_connect_once(20000);
-    if (wifi_ok) {
-        printf("[BOOT] Wi-Fi OK. IP: %s\n", wifi_ip_str());
-    } else {
-        printf("[BOOT] Wi-Fi not available. Sensors and motors will continue.\n");
-    }
+    // bool wifi_ok = wifi_try_connect_once(20000);
+    // if (wifi_ok) {
+    //     printf("[BOOT] Wi-Fi OK. IP: %s\n", wifi_ip_str());
+    // } else {
+    //     printf("[BOOT] Wi-Fi not available. Sensors and motors will continue.\n");
+    // }
 }
 
 // ============================================================================
