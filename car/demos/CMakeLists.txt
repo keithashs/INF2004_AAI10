@@ -12,7 +12,7 @@ target_include_directories(demo1 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../encoder
     ${CMAKE_CURRENT_LIST_DIR}/../imu
     ${CMAKE_CURRENT_LIST_DIR}/../pid
-    ${CMAKE_SOURCE_DIR}/../freertos_config
+    ${CMAKE_SOURCE_DIR}/freertos_config
 )
 
 target_link_libraries(demo1
@@ -41,14 +41,15 @@ add_executable(demo2
     demo2.c
 )
 
-target_include_directories(demo1 PRIVATE
+target_include_directories(demo2 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/..        # car/ (for config.h)
     ${CMAKE_CURRENT_LIST_DIR}/../motor
     ${CMAKE_CURRENT_LIST_DIR}/../encoder
     ${CMAKE_CURRENT_LIST_DIR}/../imu
     ${CMAKE_CURRENT_LIST_DIR}/../pid
     ${CMAKE_CURRENT_LIST_DIR}/../ir
-    ${CMAKE_SOURCE_DIR}/../freertos_config
+    ${CMAKE_CURRENT_LIST_DIR}/../barcode
+    ${CMAKE_SOURCE_DIR}/freertos_config
 )
 
 target_link_libraries(demo2
@@ -57,7 +58,8 @@ target_link_libraries(demo2
     FreeRTOS-Kernel-Heap4
     encoder_lib
     motor_lib
-    # barcode_lib
+    barcode_lib
+    ir_linefollow_lib
     imu_lib
     hardware_gpio
     hardware_pwm

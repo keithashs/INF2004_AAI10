@@ -1,51 +1,44 @@
 // ==============================
-// demo2.c — Demo 2 + Demo 1 inner PID core (improved steering)
+// main.c — Clean version (Demo 2) + Guard IR (DO) to stabilise search
 // ==============================
-// - Line following (ADC on LEFT IR)
-// - Guard IR (DO) to stabilise search
-// - Demo 1 inner PID drive core used during ON-LINE drive
-// - Continuous steering from ADC line error instead of fixed bias
+// - Line following remains your original: 1x IR via ADC (GPIO28 / ADC2)
+// - NEW guard IR (DO, e.g., GPIO1) used ONLY to:
+//     (a) choose the *first* search direction when line is lost
+//     (b) exit search early when ideal posture is reacquired (ADC on-line + guard white)
+// - "Remember last turn" recovery logic preserved
+// - No ultrasonic / obstacle detection
 // ==============================
 
 #include <stdio.h>
 #include <stdbool.h>
-#include <math.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
-// === Your motor + encoder headers ===
+// === Your existing motor + encoder API headers ===
 #include "motor.h"
 #include "encoder.h"
-#include "config.h"  // PID constants, TRACK_WIDTH, trims, etc.
 
 // ================== CONFIG ==================
 
-// Primary line sensor (ADC)
+// Primary line sensor (ADC): GPIO 28 (ADC2)
 #ifndef LINE_SENSOR_PIN
-#define LINE_SENSOR_PIN 27
-#endif
-#ifndef LINE_SENSOR_ADC_CH
-#define LINE_SENSOR_ADC_CH 1
+#define LINE_SENSOR_PIN 26
 #endif
 
-// Guard IR (DO) — RIGHT IR
-#ifndef IR_GUARD_DO_GPIO
-#define IR_GUARD_DO_GPIO 28
-#endif
-
-// Thresholds for line detection
+// Hysteresis thresholds (example: floor ~170, black ~4070)
 #ifndef TH_LO
-#define TH_LO  600
+#define TH_LO   600      // definitely OFF line (white floor)
 #endif
 #ifndef TH_HI
-#define TH_HI  3000
+#define TH_HI   3000     // definitely ON line (black tape)
 #endif
 
-// Gain factor for line steering
-#ifndef K_LINE_RAD_S
-#define K_LINE_RAD_S  2.0f
+// Guard IR (DO) used ONLY for search/recovery stabilisation
+// Use your actual DO pin (e.g., GP1). Active-LOW on black for most modules.
+#ifndef IR_GUARD_DO_GPIO
+#define IR_GUARD_DO_GPIO 1
 #endif
 
 #ifndef LEFT
@@ -55,42 +48,60 @@
 #define RIGHT 1
 #endif
 
+// Slow crawl speed (PID target, in cm/s) — your original Demo-2 setting
 #ifndef SLOW_SPEED_CMPS
 #define SLOW_SPEED_CMPS 2.0f
 #endif
+
+// Trim offset for drift correction (positive = reduce right motor)
+#ifndef TRIM_OFFSET
+#define TRIM_OFFSET -0.5f
+#endif
+
+// Base steering window for turn search (ms)
 #ifndef STEER_DURATION
 #define STEER_DURATION 220
 #endif
+
+// Debounce between “decisions” (ms)
 #ifndef DEBOUNCE_DELAY_MS
 #define DEBOUNCE_DELAY_MS 500
 #endif
+
+// Pivot PWM while searching
 #ifndef SEARCH_PWM
 #define SEARCH_PWM 50
 #endif
 
-// ================== Helper functions ==================
+// ================== Helpers ==================
+
+// Hysteresis around ADC thresholds for stable ON/OFF line decision
 static inline bool on_line_hys(uint16_t v) {
     static bool state = false;
-    if (v >= TH_HI)      state = true;
-    else if (v <= TH_LO) state = false;
+    if (v >= TH_HI)      state = true;   // clearly black
+    else if (v <= TH_LO) state = false;  // clearly white
     return state;
 }
 
+// Guard DO: return true when guard sees BLACK (active-LOW typical)
 static inline bool guard_is_black(void) {
     return gpio_get(IR_GUARD_DO_GPIO) == 0;
 }
 
 static void init_line_sensor(void) {
+    // Primary ADC line sensor on GPIO28/ADC2
     adc_init();
     adc_gpio_init(LINE_SENSOR_PIN);
-    adc_select_input(LINE_SENSOR_ADC_CH);
+    adc_select_input(2); // GPIO28 -> ADC2
 
+    // Guard IR (DO)
     gpio_init(IR_GUARD_DO_GPIO);
     gpio_set_dir(IR_GUARD_DO_GPIO, GPIO_IN);
     gpio_pull_up(IR_GUARD_DO_GPIO);
 }
 
-// ================== Encoder interrupts ==================
+// ================== Interrupts (encoders) ==================
+// Make sure encoder.c exports read_encoder_pulse(...)
 void driver_callbacks(uint gpio, uint32_t events) {
     switch (gpio) {
         case L_ENCODER_OUT: read_encoder_pulse(L_ENCODER_OUT, events); break;
@@ -98,65 +109,17 @@ void driver_callbacks(uint gpio, uint32_t events) {
         default: break;
     }
 }
+
 static void init_interrupts(void) {
     gpio_set_irq_enabled_with_callback(L_ENCODER_OUT, GPIO_IRQ_EDGE_RISE, true,  &driver_callbacks);
     gpio_set_irq_enabled_with_callback(R_ENCODER_OUT, GPIO_IRQ_EDGE_RISE, true,  &driver_callbacks);
 }
 
-// ================== Demo 1 Drive Core (Inner PID + Straightness) ==================
-typedef struct {
-    float s_int;
-    int lastL, lastR;
-    float iL, iR, eL_prev, eR_prev;
-} drive_core_t;
-
-static inline float clampf_local(float v, float a, float b){ return v<a?a:(v>b?b:v); }
-static inline int   clampi_local(int v, int a, int b){ return v<a?a:(v>b?b:v); }
-
-static float pid_step(float kp, float ki, float kd, float err, float dt, float *i_acc, float *e_prev){
-    *i_acc += err * dt;
-    *i_acc = clampf_local(*i_acc, -SPID_IWIND_CLAMP, +SPID_IWIND_CLAMP);
-    float d = (err - *e_prev) / dt;
-    *e_prev = err;
-    float u = kp*err + ki*(*i_acc) + kd*d;
-    return clampf_local(u, SPID_OUT_MIN, SPID_OUT_MAX);
-}
-
-static void drive_core_step(drive_core_t *dc, float target_speed_cmps, float bias_rad_s){
-    float diff_cmps = (0.5f * TRACK_WIDTH_M * bias_rad_s) * 100.0f;
-    float vL_target = target_speed_cmps - diff_cmps;
-    float vR_target = target_speed_cmps + diff_cmps;
-
-    float vL_meas = get_left_speed();
-    float vR_meas = get_right_speed();
-
-    float uL = pid_step(SPID_KP, SPID_KI, SPID_KD, vL_target - vL_meas, DT_S, &dc->iL, &dc->eL_prev);
-    float uR = pid_step(SPID_KP, SPID_KI, SPID_KD, vR_target - vR_meas, DT_S, &dc->iR, &dc->eR_prev);
-
-    float s_err = (vR_meas - vL_meas);
-    dc->s_int += s_err * DT_S;
-    dc->s_int = clampf_local(dc->s_int, -STRAIGHT_I_CLAMP, STRAIGHT_I_CLAMP);
-    float s_trim = STRAIGHT_KP * s_err + STRAIGHT_KI * dc->s_int;
-
-    int pwmL = (int)lroundf(BASE_PWM_L + uL + s_trim + GLOBAL_S_TRIM_OFFSET);
-    int pwmR = (int)lroundf(BASE_PWM_R + uR - s_trim - GLOBAL_S_TRIM_OFFSET);
-    pwmL = clampi_local(pwmL, PWM_MIN_LEFT,  PWM_MAX_LEFT);
-    pwmR = clampi_local(pwmR, PWM_MIN_RIGHT, PWM_MAX_RIGHT);
-
-    int dL = pwmL - dc->lastL, dR = pwmR - dc->lastR;
-    if (dL >  MAX_PWM_STEP) pwmL = dc->lastL + MAX_PWM_STEP;
-    if (dL < -MAX_PWM_STEP) pwmL = dc->lastL - MAX_PWM_STEP;
-    if (dR >  MAX_PWM_STEP) pwmR = dc->lastR + MAX_PWM_STEP;
-    if (dR < -MAX_PWM_STEP) pwmR = dc->lastR - MAX_PWM_STEP;
-
-    forward_motor_manual(pwmL, pwmR);
-    dc->lastL = pwmL;
-    dc->lastR = pwmR;
-}
-
-// ================== Search helper ==================
+// ================== Search helper (improved with guard DO) ==================
+// Turn and poll sensors; exit early when ADC is ON-LINE *and* guard is WHITE.
 static bool line_follow_turn_motor(int direction_0isLeft_1isRight, uint32_t steer_duration_ms) {
-    disable_pid_control();
+    disable_pid_control(); // we will hand the motion to turn helper
+
     const int motor_dir = (direction_0isLeft_1isRight == 0) ? LEFT : RIGHT;
     turn_motor_manual(motor_dir, CONTINUOUS_TURN, SEARCH_PWM, SEARCH_PWM);
 
@@ -167,35 +130,45 @@ static bool line_follow_turn_motor(int direction_0isLeft_1isRight, uint32_t stee
         uint16_t v = adc_read();
         bool on_line = on_line_hys(v);
         bool guard_white = !guard_is_black();
+
+        // Ideal reacquisition posture: ADC sees line AND guard is white
         if (on_line && guard_white) {
-            stop_motor_pid();
+            stop_motor_pid(); // also recentres any PID-owned outputs
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+
     stop_motor_pid();
     vTaskDelay(pdMS_TO_TICKS(50));
     return false;
 }
 
-// ================== Line-follow Task ==================
+// ================== Line-follow Task (Demo 2 + guard-stabilised search) ==================
 static void lineFollowTask(void *pvParameters) {
     uint64_t last_decide_time = 0;
-    drive_core_t DC = { .s_int=0.f, .lastL=BASE_PWM_L, .lastR=BASE_PWM_R };
 
-    int last_turn_dir = 0;
-    int initial_turn_direction = last_turn_dir;
+    // “Remember last turn” scaffolding
+    int last_turn_dir = 0;   // 0 = Left, 1 = Right
+    int initial_turn_direction   = last_turn_dir;
     int alternate_turn_direction = 1 - initial_turn_direction;
 
-    bool needs_second_turn = false;
+    bool needs_second_turn       = false;
+
     uint32_t initial_steer_duration = STEER_DURATION;
     uint32_t second_steer_duration  = initial_steer_duration + 60;
-    int consecutive_reversals = 0;
-    int non_reversal_turns = 0;
 
+    int consecutive_reversals = 0;
+    int non_reversal_turns    = 0;
+
+    // NEW: drift hint from guard to pick the best first search direction
+    // +1 => likely line is on RIGHT side, -1 => likely on LEFT, 0 => unknown
     int8_t drift_hint = 0;
     uint8_t drift_cnt = 0;
-    const uint8_t DRIFT_OK = 3;
+    const uint8_t DRIFT_OK = 3; // debounce samples (~3*loop ticks)
+
+    printf("[LF] Slow-PID (ADC) line following started. Guard DO at GP%d.\n", IR_GUARD_DO_GPIO);
+    printf("     Preferring %s first when unknown.\n", (last_turn_dir==0) ? "LEFT" : "RIGHT");
 
     for (;;) {
         const uint64_t now = time_us_64();
@@ -205,28 +178,30 @@ static void lineFollowTask(void *pvParameters) {
         }
         last_decide_time = now;
 
+        // Read ADC line & guard DO
         uint16_t raw = adc_read();
         bool on_line = on_line_hys(raw);
         bool guard_black = guard_is_black();
 
+        // ------------------- Normal follow (unchanged) -------------------
         if (on_line) {
-            // Convert ADC into signed error and steering bias
-            float mid   = 0.5f * (TH_LO + TH_HI);
-            float span  = fmaxf(50.0f, 0.5f * (TH_HI - TH_LO));
-            float e_raw = ((float)raw - mid) / span;
-            if (e_raw < -1.f) e_raw = -1.f;
-            if (e_raw > +1.f) e_raw = +1.f;
-
-            float bias_rad_s = K_LINE_RAD_S * e_raw;
-            drive_core_step(&DC, SLOW_SPEED_CMPS, bias_rad_s);
-
-            static uint32_t print_div = 0;
-            if (print_div++ % 4 == 0) {
-                float vL = get_left_speed();
-                float vR = get_right_speed();
-                printf("[SPEED] L=%.2f cm/s  R=%.2f cm/s | e_raw=%.2f | bias=%.2f\n", vL, vR, e_raw, bias_rad_s);
+            // When solidly on line (center), go straight without correction
+            // Only use PID near edges for gentle steering
+            bool centered_on_line = (raw >= (TH_HI - (TH_HI - TH_LO)/4));
+            
+            if (centered_on_line) {
+                // Go straight - disable PID, use manual equal speeds with trim
+                disable_pid_control();
+                float base_pwm = SLOW_SPEED_CMPS * 40;  // 100 PWM for 2 cm/s
+                float left_pwm = base_pwm + TRIM_OFFSET;   // Increase left
+                float right_pwm = base_pwm - TRIM_OFFSET;  // Decrease right
+                forward_motor_manual(left_pwm, right_pwm);
+            } else {
+                // Near edge - use PID for smooth tracking
+                forward_motor_pid(SLOW_SPEED_CMPS);
             }
 
+            // Reset recovery/scaling variables
             initial_turn_direction   = last_turn_dir;
             alternate_turn_direction = 1 - initial_turn_direction;
             initial_steer_duration   = STEER_DURATION;
@@ -235,9 +210,10 @@ static void lineFollowTask(void *pvParameters) {
             non_reversal_turns       = 0;
             needs_second_turn        = false;
 
+            // Build/decay drift hint near the loss boundary
             bool near_loss = (raw <= TH_LO + (TH_HI - TH_LO)/3);
             if (near_loss) {
-                int8_t hint_now = guard_black ? +1 : -1;
+                int8_t hint_now = guard_black ? +1 : -1; // guard black => tape near guard side
                 if (drift_cnt < 255) drift_cnt++;
                 if (drift_cnt >= DRIFT_OK) drift_hint = hint_now;
             } else {
@@ -246,7 +222,9 @@ static void lineFollowTask(void *pvParameters) {
             }
 
         } else {
-            // LOST LINE
+            // ------------------- LOST LINE: reverse & search -------------------
+
+            // Small reverse to back off before pivot
             if (consecutive_reversals < 3 || non_reversal_turns >= 3) {
                 stop_motor_pid();
                 reverse_motor_manual(130, 130);
@@ -254,9 +232,13 @@ static void lineFollowTask(void *pvParameters) {
                 if (consecutive_reversals < 3) consecutive_reversals++;
             }
 
+            // Choose the first search direction:
+            // Use guard drift hint if available; else fall back to last_turn_dir
             int prefer_dir = (drift_hint > 0) ? RIGHT : (drift_hint < 0 ? LEFT : last_turn_dir);
-            int initial_dir = prefer_dir;
+
+            int initial_dir   = prefer_dir;
             int alternate_dir = 1 - initial_dir;
+
             bool found = false;
 
             if (!needs_second_turn) {
@@ -269,9 +251,12 @@ static void lineFollowTask(void *pvParameters) {
                 if (found) last_turn_dir = alternate_dir;
             }
 
+            // Escalate steer duration to cope with near-90° bends
             if (consecutive_reversals >= 3) {
-                initial_steer_duration = (initial_steer_duration + 70 > 500) ? 500 : (initial_steer_duration + 70);
-                second_steer_duration  = (initial_steer_duration + 60 > 520) ? 520 : (initial_steer_duration + 60);
+                initial_steer_duration = (initial_steer_duration + 70 > 500)
+                                           ? 500 : (initial_steer_duration + 70);
+                second_steer_duration  = (initial_steer_duration + 60 > 520)
+                                           ? 520 : (initial_steer_duration + 60);
                 non_reversal_turns++;
             }
         }
@@ -293,8 +278,11 @@ int main(void) {
     xTaskCreate(lineFollowTask, "LineFollow", configMINIMAL_STACK_SIZE * 4,
                 NULL, tskIDLE_PRIORITY + 1, NULL);
 
-    printf("[MAIN] Demo2 + Demo1 inner PID ready.\n");
-    printf("[MAIN] LINE on GP%d (ADC%d), GUARD on GP%d.\n", LINE_SENSOR_PIN, LINE_SENSOR_ADC_CH, IR_GUARD_DO_GPIO);
+    printf("[MAIN] Slow-PID line follow ready. TH_LO=%d, TH_HI=%d, speed=%.1f cm/s\n",
+           TH_LO, TH_HI, SLOW_SPEED_CMPS);
+    printf("[MAIN] Guard DO on GP%d. Search PWM=%d, steer=%dms (+%dms).\n",
+           IR_GUARD_DO_GPIO, SEARCH_PWM, STEER_DURATION, 60);
+
     vTaskStartScheduler();
     while (true) { tight_loop_contents(); }
     return 0;

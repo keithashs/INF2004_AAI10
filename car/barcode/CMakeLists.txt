@@ -12,4 +12,6 @@ target_link_libraries(barcode_lib
     hardware_gpio
     hardware_adc
     hardware_timer
+    FreeRTOS-Kernel
+    FreeRTOS-Kernel-Heap4
 )
