@@ -136,7 +136,7 @@ static void vDriveTask(void *pvParameters) {
         float s_err = (vR_meas - vL_meas);
         s_int += s_err * DT_S;
         s_int = clampf(s_int, -STRAIGHT_I_CLAMP, STRAIGHT_I_CLAMP);
-        float s_trim = STRAIGHT_KP * s_err + STRAIGHT_KI * s_int;
+        float s_trim = STRAIGHT_KP * s_err + STRAIGHT_KI * s_int + GLOBAL_S_TRIM_OFFSET;
 
         // (7) Final PWM = BASE + PID delta ± straightness trim
         int pwmL = (int)lroundf(BASE_PWM_L + uL + s_trim);

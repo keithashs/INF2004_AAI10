@@ -18,7 +18,7 @@
 #define HDG_EMA_ALPHA        0.20f
 #define HEADING_OFFSET_DEG   0.0f       // add constant offset if sensor is skewed
 
-#define GLOBAL_S_TRIM_OFFSET  (-5.0f)
+#define GLOBAL_S_TRIM_OFFSET  (+6.0f) // negative draft left, positive draft right (5 to 10)
 #define K_LINE_RAD_S          2.0f
 
 // ================= Speed Inner PID ================
