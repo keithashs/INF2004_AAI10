@@ -18,7 +18,13 @@
 #define HDG_EMA_ALPHA        0.20f
 #define HEADING_OFFSET_DEG   0.0f       // add constant offset if sensor is skewed
 
-#define GLOBAL_S_TRIM_OFFSET  (+10.0f) // negative draft left, positive draft right (5 to 10)
+// ================= DRIFT CALIBRATION ==============
+// CRITICAL: Adjust this to fix drafting without IMU
+// Negative value = compensate for right drift (increase left PWM, decrease right PWM)
+// Positive value = compensate for left drift (decrease left PWM, increase right PWM)
+
+// Positive s_trim increases left power | Positive s_trim decreases right power
+#define GLOBAL_S_TRIM_OFFSET  (-0.1f) 
 #define K_LINE_RAD_S          2.0f
 
 // ================= Speed Inner PID ================
@@ -30,8 +36,10 @@
 #define SPID_IWIND_CLAMP     300.0f     // integral clamp for inner PIDs
 
 // ================= Straightness PI ===============
-#define STRAIGHT_KP          1.2f
-#define STRAIGHT_KI          0.30f
+// Increase KP for faster correction, but may cause oscillation
+// Increase KI for eliminating steady-state drift
+#define STRAIGHT_KP          1.2f      // Increased for faster correction
+#define STRAIGHT_KI          0.30f     // Increased for better drift elimination
 #define STRAIGHT_I_CLAMP     50.0f
 
 // ================= PWM Base & Slew ===============

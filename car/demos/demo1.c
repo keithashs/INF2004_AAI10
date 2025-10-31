@@ -172,7 +172,7 @@ static void vDriveTask(void *pvParameters) {
 // ================= Main =================
 int main(void) {
     stdio_init_all();
-    sleep_ms(800);
+    sleep_ms(10000);
 
     motor_init();
     encoder_init();
