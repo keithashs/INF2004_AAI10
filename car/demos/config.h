@@ -9,10 +9,10 @@
 #define V_TARGET_CMPS        (V_TARGET_MPS * 100.0f)
 
 // ================= IMU Outer PID ==================
-#define KP_HEADING           0.30f
-#define KI_HEADING           0.00f
-#define KD_HEADING           0.18f
-#define HEADING_DEADBAND_DEG 2.0f
+#define KP_HEADING           2.0f
+#define KI_HEADING           0.05f
+#define KD_HEADING           0.10f
+#define HEADING_DEADBAND_DEG 1.5f
 #define HEADING_RATE_SCALE   0.02f      // deg/s -> rad/s scaling
 #define DEG2RAD              (3.14159265358979323846f / 180.0f)
 #define HDG_EMA_ALPHA        0.20f
