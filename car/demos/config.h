@@ -15,7 +15,7 @@
 #define HEADING_DEADBAND_DEG 1.5f
 #define HEADING_RATE_SCALE   0.02f      // deg/s -> rad/s scaling
 #define DEG2RAD              (3.14159265358979323846f / 180.0f)
-#define HDG_EMA_ALPHA        0.20f
+#define HDG_EMA_ALPHA        0.08f
 #define HEADING_OFFSET_DEG   0.0f       // add constant offset if sensor is skewed
 
 // ================= DRIFT CALIBRATION ==============
@@ -24,23 +24,27 @@
 // Positive value = compensate for left drift (decrease left PWM, increase right PWM)
 
 // Positive s_trim increases left power | Positive s_trim decreases right power
-#define GLOBAL_S_TRIM_OFFSET  (+6.2f) 
+
+#define BATTERY_POWER_TRIM        (+4.0f)   // for power bank (estimate) 
+#define USB_POWER_TRIM            (+8.0f)   // Calibrated for PC USB
+
+#define GLOBAL_S_TRIM_OFFSET  USB_POWER_TRIM
 #define K_LINE_RAD_S          2.0f
 
 // ================= Speed Inner PID ================
-#define SPID_KP              6.0f
-#define SPID_KI              0.8f
-#define SPID_KD              0.0f
-#define SPID_OUT_MIN         0.0f
-#define SPID_OUT_MAX         255.0f
-#define SPID_IWIND_CLAMP     300.0f     // integral clamp for inner PIDs
+#define SPID_KP              2.5f
+#define SPID_KI              0.0f
+#define SPID_KD              0.3f
+#define SPID_OUT_MIN         10.0f
+#define SPID_OUT_MAX         100.0f
+#define SPID_IWIND_CLAMP     50.0f     // integral clamp for inner PIDs
 
 // ================= Straightness PI ===============
 // Increase KP for slower correction, but decrease KP for faster response may cause oscillation
 // Increase KI for eliminating steady-state drift
-#define STRAIGHT_KP          1.20f      // Increased for slower correction
-#define STRAIGHT_KI          0.30f     // Increased for better drift elimination
-#define STRAIGHT_I_CLAMP     50.0f
+#define STRAIGHT_KP          0.50f      // Increased for slower correction
+#define STRAIGHT_KI          0.10f     // Increased for better drift elimination
+#define STRAIGHT_I_CLAMP     30.0f
 
 // ================= PWM Base & Slew ===============
 #ifndef PWM_MAX_LEFT
@@ -57,7 +61,7 @@
 #endif
 #define BASE_PWM_L     (PWM_MIN_LEFT)
 #define BASE_PWM_R     (PWM_MIN_RIGHT)
-#define MAX_PWM_STEP   6
+#define MAX_PWM_STEP   20
 
 // ================= Control Loop Timing ===========
 #define LOOP_DT_MS     10

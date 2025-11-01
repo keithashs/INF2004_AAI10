@@ -7,7 +7,7 @@
 #include "hardware/i2c.h"
 
 // ===== Board wiring defaults (edit if needed) =====
-#define IMU_I2C_BAUD   115200   // you can set 400000 if your wiring is short/stable
+#define IMU_I2C_BAUD   400000   // you can set 400000 if your wiring is short/stable
 #define IMU_SDA_PIN    2
 #define IMU_SCL_PIN    3
 
@@ -39,6 +39,8 @@ bool  imu_read_mag_raw(imu_t *imu, float *mx, float *my, float *mz);
 float imu_compute_heading_deg(imu_t *imu, float ax, float ay, float az,
                               float mx, float my, float mz);
 float imu_update_and_get_heading(imu_t *imu);
+
+// void  imu_calibrate_mag(imu_t *imu);
 
 // helpers
 static inline void imu_set_mag_offsets(imu_t *imu, float mx_off, float my_off, float mz_off) {

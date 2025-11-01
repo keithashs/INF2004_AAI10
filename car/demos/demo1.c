@@ -66,6 +66,8 @@ static void vDriveTask(void *pvParameters) {
         vTaskDelete(NULL);
     }
 
+    imu_set_mag_offsets(&imu, -191.5f, -71.0f, 87.0f); // IMU calibration
+
     // ---- Inner (wheel) speed PIDs ----
     pid_ctrl_t pidL, pidR;
     pid_init(&pidL, SPID_KP, SPID_KI, SPID_KD,
@@ -79,8 +81,8 @@ static void vDriveTask(void *pvParameters) {
         float h = imu_update_and_get_heading(&imu);
         h += HEADING_OFFSET_DEG;
         h = wrap_deg_0_360(h);
-        filt_hdg = ema(filt_hdg, h, 0.20f);
-        vTaskDelay(pdMS_TO_TICKS(10));
+        filt_hdg = ema(filt_hdg, h, 0.05f);
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
     const float target_heading = filt_hdg;
 
