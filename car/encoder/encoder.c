@@ -77,14 +77,14 @@ void reset_right_encoder(void) { reset_one(&right_encoder); }
 void reset_encoders(void)      { reset_one(&left_encoder); reset_one(&right_encoder); }
 
 void encoder_init(void) {
-    gpio_init(L_ENCODER_POW); gpio_set_dir(L_ENCODER_POW, GPIO_OUT);
+    // gpio_init(L_ENCODER_POW); gpio_set_dir(L_ENCODER_POW, GPIO_OUT);
     gpio_init(L_ENCODER_OUT); gpio_set_dir(L_ENCODER_OUT, GPIO_IN); gpio_pull_up(L_ENCODER_OUT);
 
-    gpio_init(R_ENCODER_POW); gpio_set_dir(R_ENCODER_POW, GPIO_OUT);
+    // gpio_init(R_ENCODER_POW); gpio_set_dir(R_ENCODER_POW, GPIO_OUT);
     gpio_init(R_ENCODER_OUT); gpio_set_dir(R_ENCODER_OUT, GPIO_IN); gpio_pull_up(R_ENCODER_OUT);
 
-    gpio_put(L_ENCODER_POW, 1);
-    gpio_put(R_ENCODER_POW, 1);
+    // gpio_put(L_ENCODER_POW, 1);
+    // gpio_put(R_ENCODER_POW, 1);
 
     left_encoder.mutex  = xSemaphoreCreateMutex();
     right_encoder.mutex = xSemaphoreCreateMutex();

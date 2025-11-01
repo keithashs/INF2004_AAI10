@@ -9,9 +9,9 @@
 #include "semphr.h"
 
 // Pins
-#define L_ENCODER_POW 26
+// #define L_ENCODER_POW 26
 #define L_ENCODER_OUT 6
-#define R_ENCODER_POW 17
+// #define R_ENCODER_POW 17
 #define R_ENCODER_OUT 16
 
 // Wheel/disc geometry
