@@ -2,6 +2,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "encoder.h"   // for distances/speeds used by PID task
+#include "../demos/config.h"    // for config constants
 
 // =================== Config tweaks ===================
 #define RIGHT_INVERTED 0

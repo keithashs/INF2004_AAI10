@@ -19,6 +19,7 @@
 // === Your existing motor + encoder API headers ===
 #include "motor.h"
 #include "encoder.h"
+#include "config.h"   // for config constants
 
 // ================== CONFIG ==================
 

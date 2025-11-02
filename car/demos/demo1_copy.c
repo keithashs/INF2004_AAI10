@@ -9,7 +9,7 @@
 // #include "imu.h"
 #include "config.h"
 
-
+#define SPEED_FILTER_ALPHA 0.5f
 // ================= Helpers / Tiny PID ================
 typedef struct {
     float kp, ki, kd;
@@ -134,8 +134,21 @@ static void vDriveTask(void *pvParameters) {
         const float vR_target = V_TARGET_CMPS; // float vR_target = v_cmd + diff_cmps;
 
         // (4) Measured speeds (cm/s)
-        float vL_meas = get_left_speed();
-        float vR_meas = get_right_speed();
+        // NEW - with filtering:
+        float vL_raw = get_left_speed();
+        float vR_raw = get_right_speed();
+
+        // Add near top with other variables
+        static float vL_filt = 0.0f;
+        static float vR_filt = 0.0f;
+
+        // Apply EMA filter (alpha = 0.5 means 50% new, 50% old)
+        vL_filt = vL_filt * (1.0f - SPEED_FILTER_ALPHA) + vL_raw * SPEED_FILTER_ALPHA;
+        vR_filt = vR_filt * (1.0f - SPEED_FILTER_ALPHA) + vR_raw * SPEED_FILTER_ALPHA;
+
+        // Use filtered speeds for PID
+        float vL_meas = vL_filt;
+        float vR_meas = vR_filt;
 
         // (5) Inner wheel speed PIDs
         float uL = pid_update(&pidL, vL_target - vL_meas, DT_S);
