@@ -19,10 +19,14 @@ typedef struct {
 } pid_ctrl_t;
 
 static inline float clampf(float v, float lo, float hi){
-    return v < lo ? lo : (v > hi ? hi : v);
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 static inline int clampi(int v, int lo, int hi){
-    return v < lo ? lo : (v > hi ? hi : v);
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 static inline float ema(float prev, float x, float a){
     return prev*(1.f - a) + x*a;

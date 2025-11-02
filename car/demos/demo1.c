@@ -10,19 +10,16 @@
 #include "config.h"
 
 
-// ================= Helpers / Tiny PID ================
-typedef struct {
-    float kp, ki, kd;
-    float integ, prev_err;
-    float out_min, out_max;
-    float integ_min, integ_max;
-} pid_ctrl_t;
-
+/* ============================ Helpers ============================ */
 static inline float clampf(float v, float lo, float hi){
-    return v < lo ? lo : (v > hi ? hi : v);
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 static inline int clampi(int v, int lo, int hi){
-    return v < lo ? lo : (v > hi ? hi : v);
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 static inline float ema(float prev, float x, float a){
     return prev*(1.f - a) + x*a;
@@ -37,14 +34,23 @@ static inline float wrap_deg_0_360(float e){
     while (e >= 360.f) e -= 360.f;
     return e;
 }
-static inline void pid_init(pid_ctrl_t *p, float kp, float ki, float kd,
+
+/* ============================ Simple PID ============================ */
+typedef struct {
+    float kp, ki, kd;
+    float integ, prev_err;
+    float out_min, out_max;
+    float integ_min, integ_max;
+} pid_ctrl_t;
+
+static inline void pid_init(pid_ctrl_t* p, float kp, float ki, float kd,
                             float out_min, float out_max, float integ_min, float integ_max){
     p->kp = kp; p->ki = ki; p->kd = kd;
-    p->integ = 0; p->prev_err = 0;
+    p->integ = 0.f; p->prev_err = 0.f;
     p->out_min = out_min; p->out_max = out_max;
     p->integ_min = integ_min; p->integ_max = integ_max;
 }
-static inline float pid_update(pid_ctrl_t *p, float err, float dt){
+static inline float pid_update(pid_ctrl_t* p, float err, float dt){
     p->integ += err * dt;
     p->integ = clampf(p->integ, p->integ_min, p->integ_max);
     float deriv = (err - p->prev_err) / dt;
@@ -67,6 +73,13 @@ static void vDriveTask(void *pvParameters) {
     }
 
     imu_set_mag_offsets(&imu, -191.5f, -71.0f, 87.0f); // IMU calibration
+    printf("[CTRL] IMU OK\n");
+
+    // ---- Motors & encoders ----
+    motor_init();
+    encoder_init();
+    printf("[CTRL] Motors & Encoders OK  (PWM L[%d..%d] R[%d..%d])\n",
+           PWM_MIN_LEFT, PWM_MAX_LEFT, PWM_MIN_RIGHT, PWM_MAX_RIGHT);
 
     // ---- Inner (wheel) speed PIDs ----
     pid_ctrl_t pidL, pidR;
@@ -84,33 +97,37 @@ static void vDriveTask(void *pvParameters) {
         filt_hdg = ema(filt_hdg, h, 0.05f);
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    const float target_heading = filt_hdg;
+    const float target_heading_deg = filt_hdg;
+    printf("[CTRL] Target heading = %.1f deg (corrected)\n", (double)target_heading_deg);
 
-    // ---- Straightness PI + slew memory ----
-    float s_int = 0.f;
-    int lastL = BASE_PWM_L, lastR = BASE_PWM_R;
+    // ---- Controllers' state ----
+    float h_integ = 0.f, h_prev_err = 0.f; // outer IMU PID
+    float s_int   = 0.0f;                  // straightness PI
+    int   lastL   = PWM_MIN_LEFT;
+    int   lastR   = PWM_MIN_RIGHT;
 
-    // ---- Outer heading PID memory ----
-    float h_integ = 0.f, h_prev_err = 0.f;
+    // ---- Telemetry running state ----
+    float dist_cm = 0.0f;
 
+    // ---- Task timing ----
     TickType_t last_wake = xTaskGetTickCount();
 
     for (;;) {
-        // (1) Read and filter heading
+        // === 1) IMU heading (raw + filtered) ===
         float raw_hdg = imu_update_and_get_heading(&imu);
         raw_hdg += HEADING_OFFSET_DEG;
         raw_hdg = wrap_deg_0_360(raw_hdg);
         filt_hdg = ema(filt_hdg, raw_hdg, HDG_EMA_ALPHA);
 
-        // (2) Outer IMU PID -> delta_w (rad/s)
-        float h_err = wrap_deg_pm180(target_heading - filt_hdg);
+        // Outer IMU PID -> delta_w (rad/s)
+        float h_err = wrap_deg_pm180(target_heading_deg - filt_hdg);
         if (fabsf(h_err) < HEADING_DEADBAND_DEG) h_err = 0.f;
 
         float h_deriv = (h_err - h_prev_err) / DT_S;
         h_prev_err = h_err;
 
-        if (KI_HEADING > 0.f) {
-            float h_iw = 150.0f / (KI_HEADING > 1e-6f ? KI_HEADING : 1e-6f);
+        if (KI_HEADING > 0.f){
+            float h_iw = 150.0f / fmaxf(KI_HEADING, 1e-6f);
             h_integ += h_err * DT_S;
             h_integ = clampf(h_integ, -h_iw, +h_iw);
         }
@@ -120,15 +137,24 @@ static void vDriveTask(void *pvParameters) {
 
         float delta_w = delta_heading_rate_deg_s * DEG2RAD * HEADING_RATE_SCALE;
 
-        // (3) Split v, w into left/right speed targets (cm/s)
-        float v_cmd = V_TARGET_CMPS;
+        // === 2) Command v (cm/s) ===
+        const float v_cmd_cmps = V_TARGET_CMPS;
+
+        // === 3) (v, delta_w) -> left/right targets (cm/s) ===
         float diff_cmps = (0.5f * TRACK_WIDTH_M * delta_w) * 100.0f;
-        float vL_target = v_cmd - diff_cmps;
-        float vR_target = v_cmd + diff_cmps;
+        float vL_target = v_cmd_cmps - diff_cmps;
+        float vR_target = v_cmd_cmps + diff_cmps;
 
         // (4) Measured speeds (cm/s)
         float vL_meas = get_left_speed();
         float vR_meas = get_right_speed();
+        static float vL_prev = 0.0f, vR_prev = 0.0f;
+        if (vL_meas < 0.0f) vL_meas = vL_prev; else vL_prev = vL_meas;
+        if (vR_meas < 0.0f) vR_meas = vR_prev; else vR_prev = vR_meas;
+
+        // integrate distance (cm)
+        float v_avg = 0.5f * (vL_meas + vR_meas);
+        dist_cm += v_avg * DT_S;
 
         // (5) Inner wheel speed PIDs
         float uL = pid_update(&pidL, vL_target - vL_meas, DT_S);
@@ -138,11 +164,11 @@ static void vDriveTask(void *pvParameters) {
         float s_err = (vR_meas - vL_meas);
         s_int += s_err * DT_S;
         s_int = clampf(s_int, -STRAIGHT_I_CLAMP, STRAIGHT_I_CLAMP);
-        float s_trim = STRAIGHT_KP * s_err + STRAIGHT_KI * s_int + GLOBAL_S_TRIM_OFFSET;
+        float s_trim = STRAIGHT_KP * s_err + STRAIGHT_KI * s_int;
 
         // (7) Final PWM = BASE + PID delta ± straightness trim
-        int pwmL = (int)lroundf(BASE_PWM_L + uL + s_trim);
-        int pwmR = (int)lroundf(BASE_PWM_R + uR - s_trim);
+        int pwmL = (int)lroundf(BASE_PWM_L + uL + WHEEL_TRIM_LEFT  + s_trim);
+        int pwmR = (int)lroundf(BASE_PWM_R + uR + WHEEL_TRIM_RIGHT - s_trim);
         pwmL = clampi(pwmL, PWM_MIN_LEFT,  PWM_MAX_LEFT);
         pwmR = clampi(pwmR, PWM_MIN_RIGHT, PWM_MAX_RIGHT);
 
@@ -160,10 +186,15 @@ static void vDriveTask(void *pvParameters) {
         static int div = 0;
         if (++div >= (1000/LOOP_DT_MS/5)) {
             div = 0;
-            printf("[CTRL] Hdg=%.1f Err=%.2f dW=%.3f | "
-                   "L[%.1f/%.1f] R[%.1f/%.1f] | PWM[%d,%d]\n",
-                   filt_hdg, h_err, delta_w,
-                   vL_target, vL_meas, vR_target, vR_meas,
+            printf("[CTRL] hdg=%.1f(raw=%.1f) herr=%.2f dW=%.3f  v=%.1f  "
+                   "vL[t/m]=%.2f/%.2f  vR[t/m]=%.2f/%.2f  dist=%.1f  "
+                   "s_err=%.2f s_int=%.2f str=%.2f  PWM[L=%d R=%d]\n",
+                   (double)filt_hdg, (double)raw_hdg, (double)h_err, (double)delta_w,
+                   (double)v_cmd_cmps,
+                   (double)vL_target, (double)vL_meas,
+                   (double)vR_target, (double)vR_meas,
+                   (double)dist_cm,
+                   (double)s_err, (double)s_int, (double)s_trim,
                    pwmL, pwmR);
         }
 
@@ -174,12 +205,14 @@ static void vDriveTask(void *pvParameters) {
 // ================= Main =================
 int main(void) {
     stdio_init_all();
-    sleep_ms(10000);
+    sleep_ms(15000);
 
-    motor_init();
-    encoder_init();
+    printf("\n[BOOT] Demo1 single-file: FreeRTOS + MQTT. "
+           "HeadingPID(%.2f/%.2f/%.2f)  SpeedPID(%.2f/%.2f/%.2f)\n",
+           (double)KP_HEADING, (double)KI_HEADING, (double)KD_HEADING,
+           (double)SPID_KP, (double)SPID_KI, (double)SPID_KD);
 
-    xTaskCreate(vDriveTask, "DriveTask", 2048, NULL, 1, NULL);
+    xTaskCreate(vDriveTask, "DriveTask", 2048, NULL, tskIDLE_PRIORITY + 2, NULL);
     vTaskStartScheduler();
 
     // If scheduler returns
