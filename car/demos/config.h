@@ -9,47 +9,81 @@
 #define V_TARGET_CMPS        (V_TARGET_MPS * 100.0f)
 
 // ================= IMU Outer PID ==================
-#define KP_HEADING           2.0f
-#define KI_HEADING           0.05f
-#define KD_HEADING           0.10f
-#define HEADING_DEADBAND_DEG 1.5f
-#define HEADING_RATE_SCALE   0.02f      // deg/s -> rad/s scaling
+#ifndef KP_HEADING
+#define KP_HEADING           0.30f
+#endif
+#ifndef KI_HEADING
+#define KI_HEADING           0.00f      // keep 0 during inner-loop ID
+#endif
+#ifndef KD_HEADING
+#define KD_HEADING           0.18f
+#endif
+#define HEADING_DEADBAND_DEG 2.0f
+#define HEADING_RATE_SCALE   0.02f      // deg/s -> rad/s scaling (lower = less aggressive)
 #define DEG2RAD              (3.14159265358979323846f / 180.0f)
-#define HDG_EMA_ALPHA        0.08f
-#define HEADING_OFFSET_DEG   0.0f       // add constant offset if sensor is skewed
+#define HDG_EMA_ALPHA        0.20f
+#define HEADING_OFFSET_DEG   20.0f       // add constant offset if sensor is skewed
 
 // ================= DRIFT CALIBRATION ==============
-// CRITICAL: Adjust this to fix drafting without IMU
+#ifndef WHEEL_TRIM_LEFT
+#define WHEEL_TRIM_LEFT      0   // start at 0; tweak after encoder & FF tuning
+#endif
+#ifndef WHEEL_TRIM_RIGHT
+#define WHEEL_TRIM_RIGHT     -5   // start at 0; tweak after encoder & FF tuning
+#endif
 
-// Positive s_trim increases left power | Positive s_trim decreases right power
-// Positive Left faster, Right slower | Negative Left slower, Right faster
-#define BATTERY_POWER_TRIM        (+0.0f)   // for power bank (estimate) 
-#define USB_POWER_TRIM            (+2.0f)   // Calibrated for PC USB
+// ================= Feed-Forward Control ===========
+// Simple linear model per wheel: PWM ≈ kS + kV * v_cmd (v in cm/s)
+// Start with these; refine from logs (steady-state PWM vs. measured v)
+#ifndef KS_L
+#define KS_L 70.0f
+#endif
+#ifndef KV_L
+#define KV_L 3.0f
+#endif
+#ifndef KS_R
+#define KS_R 70.0f
+#endif
+#ifndef KV_R
+#define KV_R 3.0f
+#endif
 
-#define GLOBAL_S_TRIM_OFFSET  USB_POWER_TRIM
-#define K_LINE_RAD_S          2.0f
+// Gate to disable FF quickly if needed
+#ifndef FF_ENABLE
+#define FF_ENABLE 1
+#endif
+
+// ================= Encoder Scaling ================
+// Temporary per-wheel scale (1.0 = no correction). Use 1m test to compute these.
+#ifndef ENC_SCALE_L
+#define ENC_SCALE_L 1.0f
+#endif
+#ifndef ENC_SCALE_R
+#define ENC_SCALE_R 1.0f
+#endif
 
 // ================= Speed Inner PID ================
-#define SPID_KP              2.0f
-#define SPID_KI              0.3f
+// Allow PID to command both up and down around FF (signed)
+#define SPID_KP              6.0f
+#define SPID_KI              0.50f  // slightly lower than before; FF carries most of the load
 #define SPID_KD              0.0f
-#define SPID_OUT_MIN         -50.0f  // Allow correction range
-#define SPID_OUT_MAX         +50.0f  // Allow boost range
-#define SPID_IWIND_CLAMP     166.7f  // ← OUT_MAX/KI = 50/0.3 = 166.7
+#define SPID_OUT_MIN         (-255.0f)
+#define SPID_OUT_MAX         ((float)PWM_MAX_RIGHT)
+#define SPID_IWIND_CLAMP     300.0f
 
 // ================= Straightness PI ===============
 // Increase KP for slower correction, but decrease KP for faster response may cause oscillation
 // Increase KI for eliminating steady-state drift
-#define STRAIGHT_KP          0.00f      // Increased for slower correction
-#define STRAIGHT_KI          0.00f     // Increased for better drift elimination
-#define STRAIGHT_I_CLAMP     30.0f
+#define STRAIGHT_KP          1.2f      // Increased for slower correction
+#define STRAIGHT_KI          0.30f     // Increased for better drift elimination
+#define STRAIGHT_I_CLAMP     50.0f
 
 // ================= PWM Base & Slew ===============
 #ifndef PWM_MIN_LEFT
-#define PWM_MIN_LEFT   140
+#define PWM_MIN_LEFT   80  // Battery VIN(3.6V–6V)
 #endif
 #ifndef PWM_MIN_RIGHT
-#define PWM_MIN_RIGHT  135
+#define PWM_MIN_RIGHT  80  // Battery VIN(3.6V–6V)
 #endif
 #ifndef PWM_MAX_LEFT
 #define PWM_MAX_LEFT   255
@@ -59,7 +93,7 @@
 #endif
 
 #ifndef PWM_MID_LEFT
-#define PWM_MID_LEFT   170
+#define PWM_MID_LEFT   160
 #endif
 #ifndef PWM_MID_RIGHT
 #define PWM_MID_RIGHT  160
@@ -82,9 +116,10 @@
 #define JUMPSTART_SPEED_THRESHOLD 0.1f
 #endif
 
-#define BASE_PWM_L     (PWM_MIN_LEFT)
-#define BASE_PWM_R     (PWM_MIN_RIGHT)
-#define MAX_PWM_STEP   20
+// --- No base PWM; FF takes its place ---
+#define BASE_PWM_L           0
+#define BASE_PWM_R           0
+#define MAX_PWM_STEP         6
 
 // ================= Turning Constants =============
 #define FULL_CIRCLE    360.0f

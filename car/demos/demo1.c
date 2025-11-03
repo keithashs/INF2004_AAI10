@@ -1,14 +1,41 @@
+// demo1.c
+// Integrated control + Wi-Fi + MQTT telemetry.
+// - Feed-forward control with signed speed PID
+// - Network task handles Wi-Fi + MQTT reconnect
+// - Control task publishes JSON telemetry
+
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
+
 #include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
+
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
+#include "semphr.h"
+
+#include "lwip/err.h"
+#include "lwip/ip_addr.h"
+#include "lwip/inet.h"
+#include "lwip/dns.h"
+#include "lwip/apps/mqtt.h"
 
 #include "motor.h"
 #include "encoder.h"
 #include "imu.h"
 #include "config.h"
 
+/* ============================ Wi-Fi & MQTT Config ========================= */
+// USER: Update these for your network
+#define WIFI_SSID                 "Keithiphone"
+#define WIFI_PASS                 "testong1"
+#define WIFI_CONNECT_TIMEOUT_MS   20000
+
+#define BROKER_IP_STR             "172.20.10.2"
+#define BROKER_PORT               1883
+#define MQTT_TOPIC_TELEM          "pico/demo1/telemetry"
 
 /* ============================ Helpers ============================ */
 static inline float clampf(float v, float lo, float hi){
@@ -59,6 +86,127 @@ static inline float pid_update(pid_ctrl_t* p, float err, float dt){
     return clampf(u, p->out_min, p->out_max);
 }
 
+/* ============================ Wi-Fi / MQTT ========================= */
+static mqtt_client_t *g_mqtt = NULL;
+static ip_addr_t      g_broker_ip;
+static SemaphoreHandle_t g_mqtt_mutex;
+
+// Global flag for clean shutdown
+static volatile bool g_shutdown = false;
+
+// Call this when you want to exit cleanly (button press, RPC, etc.)
+static void mqtt_disconnect_now(void){
+    if (!g_mqtt) return;
+    // Tell lwIP we're about to touch the stack
+    cyw43_arch_lwip_begin();
+    mqtt_disconnect(g_mqtt);     // Sends MQTT DISCONNECT then closes TCP
+    cyw43_arch_lwip_end();
+
+    // Optional: give time for TCP close handshake
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+// Example: trigger shutdown from anywhere
+static void request_shutdown(void){
+    g_shutdown = true;
+}
+
+static void mqtt_pub_cb(void *arg, err_t result){ 
+    (void)arg; (void)result; 
+}
+
+static void mqtt_conn_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status){
+    (void)client; (void)arg;
+    if (status == MQTT_CONNECT_ACCEPTED) printf("[MQTT] Connected\n");
+    else printf("[MQTT] Disconnected status=%d\n", (int)status);
+}
+
+static bool wifi_connect_blocking(uint32_t timeout_ms){
+    printf("[NET] Connecting to Wi-Fi SSID: %s\n", WIFI_SSID);
+    int err = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS,
+                                                  CYW43_AUTH_WPA2_AES_PSK, timeout_ms);
+    if (err){
+        printf("[NET] Wi-Fi connect failed: (err=%d)\n", err);
+        return false;
+    }
+    printf("[NET] Wi-Fi connected, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    return true;
+}
+
+static bool mqtt_connect_blocking(void){
+    if (!g_mqtt){
+        g_mqtt = mqtt_client_new();
+        if (!g_mqtt){ 
+            printf("[MQTT] mqtt_client_new failed\n");
+            return false; 
+        }
+    }
+    cyw43_arch_lwip_begin();
+    struct mqtt_connect_client_info_t ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.client_id = "pico_demo1";
+    err_t r = mqtt_client_connect(g_mqtt, &g_broker_ip, BROKER_PORT, mqtt_conn_cb, NULL, &ci);
+    cyw43_arch_lwip_end();
+    if (r != ERR_OK){ printf("[MQTT] connect err=%d\n", r); return false; }
+    
+    // Wait up to 5s for connection
+    for (int i = 0; i < 50; ++i){
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (mqtt_client_is_connected(g_mqtt)) return true;
+    }
+    return mqtt_client_is_connected(g_mqtt);
+}
+
+static bool mqtt_is_connected(void){ 
+    return g_mqtt && mqtt_client_is_connected(g_mqtt); 
+}
+
+static err_t mqtt_publish_str(const char *topic, const char *payload){
+    if (!mqtt_is_connected()) return ERR_CONN;
+    if (g_mqtt_mutex) xSemaphoreTake(g_mqtt_mutex, portMAX_DELAY);
+    cyw43_arch_lwip_begin();
+    err_t r = mqtt_publish(g_mqtt, topic, (const u8_t*)payload, (u16_t)strlen(payload),
+                           0 /*qos0*/, 0 /*retain*/, mqtt_pub_cb, NULL);
+    cyw43_arch_lwip_end();
+    if (g_mqtt_mutex) xSemaphoreGive(g_mqtt_mutex);
+    return r;
+}
+
+static void vNetworkTask(void *param){
+    (void)param;
+
+    if (cyw43_arch_init()){ 
+        printf("[NET] cyw43 init failed\n"); 
+        vTaskDelete(NULL); 
+    }
+    cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
+    cyw43_arch_enable_sta_mode();
+
+    while (!wifi_connect_blocking(WIFI_CONNECT_TIMEOUT_MS)){
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    ip4_addr_set_u32(ip_2_ip4(&g_broker_ip), ipaddr_addr(BROKER_IP_STR));
+    printf("[NET] Broker %s:%d\n", BROKER_IP_STR, BROKER_PORT);
+
+    for (;;){
+        if (g_shutdown){
+            mqtt_disconnect_now();
+            break; // exit task
+        }
+
+        if (!mqtt_is_connected()){
+            printf("[MQTT] Connecting...\n");
+            (void)mqtt_connect_blocking();
+        }
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(750));
+    }
+    
+    vTaskDelete(NULL);
+}
+
 // ================= FreeRTOS Task =====================
 static void vDriveTask(void *pvParameters) {
     // ---- IMU ----
@@ -72,7 +220,7 @@ static void vDriveTask(void *pvParameters) {
         vTaskDelete(NULL);
     }
 
-    imu_set_mag_offsets(&imu, -191.5f, -71.0f, 87.0f); // IMU calibration
+    // imu_set_mag_offsets(&imu, -191.5f, -71.0f, 87.0f); // IMU calibration
     printf("[CTRL] IMU OK\n");
 
     // ---- Motors & encoders ----
@@ -111,8 +259,17 @@ static void vDriveTask(void *pvParameters) {
 
     // ---- Task timing ----
     TickType_t last_wake = xTaskGetTickCount();
+    int telem_div = 0;
 
     for (;;) {
+        if (g_shutdown){
+            forward_motor_manual(0,0);   // stop motors safely
+            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelete(NULL);
+        }
+
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LOOP_DT_MS));
+
         // === 1) IMU heading (raw + filtered) ===
         float raw_hdg = imu_update_and_get_heading(&imu);
         raw_hdg += HEADING_OFFSET_DEG;
@@ -132,10 +289,8 @@ static void vDriveTask(void *pvParameters) {
             h_integ = clampf(h_integ, -h_iw, +h_iw);
         }
 
-        float delta_heading_rate_deg_s =
-            KP_HEADING * h_err + KI_HEADING * h_integ + KD_HEADING * h_deriv;
-
-        float delta_w = delta_heading_rate_deg_s * DEG2RAD * HEADING_RATE_SCALE;
+        float delta_heading_rate_deg_s = KP_HEADING * h_err + KI_HEADING * h_integ + KD_HEADING * h_deriv;
+        float delta_w = delta_heading_rate_deg_s * DEG2RAD * HEADING_RATE_SCALE; // rad/s
 
         // === 2) Command v (cm/s) ===
         const float v_cmd_cmps = V_TARGET_CMPS;
@@ -146,8 +301,8 @@ static void vDriveTask(void *pvParameters) {
         float vR_target = v_cmd_cmps + diff_cmps;
 
         // (4) Measured speeds (cm/s)
-        float vL_meas = get_left_speed();
-        float vR_meas = get_right_speed();
+        float vL_meas = ENC_SCALE_L * get_left_speed();
+        float vR_meas = ENC_SCALE_R * get_right_speed();
         static float vL_prev = 0.0f, vR_prev = 0.0f;
         if (vL_meas < 0.0f) vL_meas = vL_prev; else vL_prev = vL_meas;
         if (vR_meas < 0.0f) vR_meas = vR_prev; else vR_prev = vR_meas;
@@ -156,7 +311,7 @@ static void vDriveTask(void *pvParameters) {
         float v_avg = 0.5f * (vL_meas + vR_meas);
         dist_cm += v_avg * DT_S;
 
-        // (5) Inner wheel speed PIDs
+        // (5) Inner Wheel speed PIDs -> delta PWM (signed)
         float uL = pid_update(&pidL, vL_target - vL_meas, DT_S);
         float uR = pid_update(&pidR, vR_target - vR_meas, DT_S);
 
@@ -167,57 +322,84 @@ static void vDriveTask(void *pvParameters) {
         float s_trim = STRAIGHT_KP * s_err + STRAIGHT_KI * s_int;
 
         // (7) Final PWM = BASE + PID delta ± straightness trim
+        float ffL = FF_ENABLE ? (KS_L + KV_L * vL_target) : 0.0f;
+        float ffR = FF_ENABLE ? (KS_R + KV_R * vR_target) : 0.0f;
         int pwmL = (int)lroundf(BASE_PWM_L + uL + WHEEL_TRIM_LEFT  + s_trim);
         int pwmR = (int)lroundf(BASE_PWM_R + uR + WHEEL_TRIM_RIGHT - s_trim);
-        pwmL = clampi(pwmL, PWM_MIN_LEFT,  PWM_MAX_LEFT);
+        
+        // clamp & slew
+        pwmL = clampi(pwmL, PWM_MIN_LEFT, PWM_MAX_LEFT);
         pwmR = clampi(pwmR, PWM_MIN_RIGHT, PWM_MAX_RIGHT);
 
-        // (8) Slew limit
-        int dL = pwmL - lastL, dR = pwmR - lastR;
-        if (dL >  MAX_PWM_STEP) pwmL = lastL + MAX_PWM_STEP;
-        if (dL < -MAX_PWM_STEP) pwmL = lastL - MAX_PWM_STEP;
-        if (dR >  MAX_PWM_STEP) pwmR = lastR + MAX_PWM_STEP;
-        if (dR < -MAX_PWM_STEP) pwmR = lastR - MAX_PWM_STEP;
-
-        forward_motor_manual(pwmL, pwmR);
+        if (pwmL > lastL + MAX_PWM_STEP) pwmL = lastL + MAX_PWM_STEP; 
+        else if (pwmL < lastL - MAX_PWM_STEP) pwmL = lastL - MAX_PWM_STEP;
+        
+        if (pwmR > lastR + MAX_PWM_STEP) pwmR = lastR + MAX_PWM_STEP; 
+        else if (pwmR < lastR - MAX_PWM_STEP) pwmR = lastR - MAX_PWM_STEP;
+        
         lastL = pwmL; lastR = pwmR;
 
-        // (9) Telemetry (~5 Hz)
-        static int div = 0;
-        if (++div >= (1000/LOOP_DT_MS/5)) {
-            div = 0;
-            printf("[CTRL] hdg=%.1f(raw=%.1f) herr=%.2f dW=%.3f  v=%.1f  "
+        // 8) Apply motors
+        forward_motor_manual(pwmL, pwmR);
+
+        // 9) Telemetry: USB + MQTT JSON (~5 Hz)
+        if ((telem_div++ % (1000/LOOP_DT_MS/5)) == 0) {
+            float herr_abs = fabsf(h_err);
+            printf("[CTRL] hdg=%.1f(raw=%.1f) herr=%.2f  v=%.1f  "
                    "vL[t/m]=%.2f/%.2f  vR[t/m]=%.2f/%.2f  dist=%.1f  "
-                   "s_err=%.2f s_int=%.2f str=%.2f  PWM[L=%d R=%d]\n",
-                   (double)filt_hdg, (double)raw_hdg, (double)h_err, (double)delta_w,
-                   (double)v_cmd_cmps,
+                   "s_err=%.2f s_int=%.2f str=%.2f  FF[L=%.0f R=%.0f] PID[L=%.0f R=%.0f] PWM[L=%d R=%d]\n",
+                   (double)filt_hdg, (double)raw_hdg, (double)herr_abs, (double)v_cmd_cmps,
                    (double)vL_target, (double)vL_meas,
                    (double)vR_target, (double)vR_meas,
                    (double)dist_cm,
                    (double)s_err, (double)s_int, (double)s_trim,
+                   (double)ffL, (double)ffR,
+                   (double)uL, (double)uR,
                    pwmL, pwmR);
-        }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LOOP_DT_MS));
+            if (mqtt_is_connected()){
+                char json[224];
+                uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
+                int n = snprintf(json, sizeof(json),
+                    "{\"ts\":%u,\"vL\":%.2f,\"vR\":%.2f,\"vAvg\":%.2f,"
+                    "\"dist\":%.1f,\"hdgRaw\":%.1f,\"hdg\":%.1f,"
+                    "\"pwmL\":%d,\"pwmR\":%d}",
+                    (unsigned)ts_ms,
+                    (double)vL_meas, (double)vR_meas, (double)v_avg,
+                    (double)dist_cm, (double)raw_hdg, (double)filt_hdg,
+                    pwmL, pwmR);
+                if (n > 0 && n < (int)sizeof(json)) {
+                    err_t r = mqtt_publish_str(MQTT_TOPIC_TELEM, json);
+                    if (r != ERR_OK) printf("[MQTT] publish err=%d\n", r);
+                }
+            }
+        }
     }
 }
 
-// ================= Main =================
+/* ============================ Main ============================ */
 int main(void) {
     stdio_init_all();
-    sleep_ms(15000);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    sleep_ms(10000);
 
-    printf("\n[BOOT] Demo1 single-file: FreeRTOS + MQTT. "
+    printf("\n[BOOT] Demo1 with FreeRTOS + MQTT. "
            "HeadingPID(%.2f/%.2f/%.2f)  SpeedPID(%.2f/%.2f/%.2f)\n",
            (double)KP_HEADING, (double)KI_HEADING, (double)KD_HEADING,
            (double)SPID_KP, (double)SPID_KI, (double)SPID_KD);
 
-    xTaskCreate(vDriveTask, "DriveTask", 2048, NULL, tskIDLE_PRIORITY + 2, NULL);
-    vTaskStartScheduler();
+    g_mqtt_mutex = xSemaphoreCreateMutex();
 
+    // Start network task (Wi-Fi + MQTT reconnect loop)
+    xTaskCreate(vNetworkTask, "net", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
+
+    // Start control loop task
+    xTaskCreate(vDriveTask, "drive", 4096, NULL, tskIDLE_PRIORITY + 2, NULL);
+
+    vTaskStartScheduler();
+    
     // If scheduler returns
-    while (true) {
-        printf("Scheduler failed!\n");
-        sleep_ms(1000);
+    while (true) { 
+        tight_loop_contents(); 
     }
 }
