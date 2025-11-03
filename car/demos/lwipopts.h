@@ -25,6 +25,8 @@
 #define TCPIP_MBOX_SIZE 8
 #define LWIP_TIMEVAL_PRIVATE 0
 
+#define MEMP_NUM_SYS_TIMEOUT   20 
+
 // ==== Optional Debugging ====
 #define LWIP_DEBUG 0                   // set to 1 to enable lwIP debug
 #define DHCP_DEBUG LWIP_DBG_ON         // optional

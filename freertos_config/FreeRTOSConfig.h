@@ -108,6 +108,7 @@
 #define configTICK_CORE                         0
 #define configRUN_MULTIPLE_PRIORITIES           1
 #define configUSE_CORE_AFFINITY                 0
+#define configUSE_MESSAGE_BUFFER                1
 #endif
 
 /* RP2040 specific */
