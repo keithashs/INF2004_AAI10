@@ -2,7 +2,6 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "encoder.h"   // for distances/speeds used by PID task
-#include "../demos/config.h"    // for config constants
 
 // =================== Config tweaks ===================
 #define RIGHT_INVERTED 0
@@ -72,7 +71,7 @@ void turn_motor_manual(int direction, float angle, float pl,float pr){
 void stop_motor_manual(void){ disable_pid_control(); stop_motor(); }
 
 void offset_move_motor(int direction, int turn, float offset){
-    if (offset < 0.f) offset = 0.f;
+    if (offset < 0.f) offset = 0.f; 
     if (offset > 1.f) offset = 1.f;
     int pl = PWM_MID_LEFT, pr = PWM_MID_RIGHT;
     int lspan = (PWM_MAX_LEFT  - PWM_MIN_LEFT )/2;

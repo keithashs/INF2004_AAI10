@@ -4,8 +4,8 @@
 #include "pico/stdlib.h"
 
 // IR sensor pins (change if needed)
-#define IR_LEFT_PIN   28
-#define IR_RIGHT_PIN  26
+#define IR_LEFT_PIN   26
+#define IR_RIGHT_PIN  28
 
 // If IR sensor outputs LOW on black line, set to 1
 // If it outputs HIGH on black line, set to 0

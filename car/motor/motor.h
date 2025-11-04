@@ -14,21 +14,21 @@
 // #define MOTOR_STBY 22  // optional if your driver has STBY
 
 // ---------------- PWM/Speed constants ----------------
-// #define PWM_MIN_LEFT   80
-// #define PWM_MIN_RIGHT  80
-// #define PWM_MID_LEFT   160
-// #define PWM_MID_RIGHT  160
-// #define PWM_MAX_LEFT   255
-// #define PWM_MAX_RIGHT  255
-// #define PWM_JUMPSTART  120
+#define PWM_MIN_LEFT   80
+#define PWM_MIN_RIGHT  80
+#define PWM_MID_LEFT   160
+#define PWM_MID_RIGHT  160
+#define PWM_MAX_LEFT   255
+#define PWM_MAX_RIGHT  255
+#define PWM_JUMPSTART  120
 
-// #define MIN_SPEED                 2.0f
-// #define MAX_SPEED                 5.0f
-// #define TURN_SPEED                5.0f
-// #define JUMPSTART_SPEED_THRESHOLD 0.1f
+#define MIN_SPEED                 2.0f
+#define MAX_SPEED                 5.0f
+#define TURN_SPEED                5.0f
+#define JUMPSTART_SPEED_THRESHOLD 0.1f
 
-// #define FULL_CIRCLE    360.0f
-// #define CONTINUOUS_TURN -1.0f
+#define FULL_CIRCLE    360.0f
+#define CONTINUOUS_TURN -1.0f
 
 typedef enum { PID_STOP, PID_FWD, PID_REV, PID_LEFT, PID_RIGHT, PID_TURNING, PID_DISABLED } PIDState;
 

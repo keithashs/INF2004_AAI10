@@ -93,3 +93,17 @@ void encoder_init(void) {
     gpio_set_irq_enabled_with_callback(L_ENCODER_OUT, GPIO_IRQ_EDGE_RISE, true, &read_encoder_pulse);
     gpio_set_irq_enabled(R_ENCODER_OUT, GPIO_IRQ_EDGE_RISE, true);
 }
+
+void reset_encoder_counts(void) { reset_encoders(); }
+
+static uint32_t get_count_from(Encoder *enc) {
+    uint32_t c = 0;
+    if (xSemaphoreTake(enc->mutex, portMAX_DELAY) == pdTRUE) {
+        c = enc->data.pulse_count;
+        xSemaphoreGive(enc->mutex);
+    }
+    return c;
+}
+
+uint32_t get_left_encoder_count(void)  { return get_count_from(&left_encoder); }
+uint32_t get_right_encoder_count(void) { return get_count_from(&right_encoder); }

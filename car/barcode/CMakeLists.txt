@@ -10,8 +10,8 @@ target_include_directories(barcode_lib PUBLIC
 target_link_libraries(barcode_lib
     pico_stdlib
     hardware_gpio
-    hardware_adc
     hardware_timer
+    hardware_pwm
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
 )
