@@ -45,10 +45,10 @@
 
 // --- Per-wheel trims (bias offsets, PWM units) ---
 #ifndef WHEEL_TRIM_LEFT
-#define WHEEL_TRIM_LEFT      0   // start at 0; tweak after encoder & FF tuning
+#define WHEEL_TRIM_LEFT      7  // start at 0; tweak after encoder & FF tuning
 #endif
 #ifndef WHEEL_TRIM_RIGHT
-#define WHEEL_TRIM_RIGHT     -5   // start at 0; tweak after encoder & FF tuning
+#define WHEEL_TRIM_RIGHT     -8   // start at 0; tweak after encoder & FF tuning
 #endif
 
 // --- Target speed ---
@@ -71,7 +71,7 @@
 #define HDG_EMA_ALPHA        0.20f
 #define DEG2RAD              (float)(M_PI / 180.0f)
 // While testing, keep offset 0 so captured target ≈ real facing.
-#define HEADING_OFFSET_DEG   20.0f
+#define HEADING_OFFSET_DEG   0.0f
 #define HEADING_RATE_SCALE   0.02f   // drop to 0.10 if too aggressive
 
 // --- Wheel-speed inner PID (signed output) ---
@@ -91,15 +91,15 @@
 // Allow PID to command both up and down around FF (signed)
 #define SPID_OUT_MIN         (-255.0f)
 #define SPID_OUT_MAX         (float)(PWM_MAX_RIGHT)
-#define SPID_KP              6.0f
-#define SPID_KI              0.50f  // slightly lower than before; FF carries most of the load
+#define SPID_KP              3.0f
+#define SPID_KI              0.10f  // slightly lower than before; FF carries most of the load
 #define SPID_KD              0.0f
 #define SPID_IWIND_CLAMP     300.0f
 
 // --- Straightness PI (bias cleanup only) ---
-#define STRAIGHT_KP          1.2f
-#define STRAIGHT_KI          0.30f
-#define STRAIGHT_I_CLAMP     50.0f
+#define STRAIGHT_KP          1.0f
+#define STRAIGHT_KI          0.10f
+#define STRAIGHT_I_CLAMP     20.0f
 
 // --- No base PWM; FF takes its place ---
 #define BASE_PWM_L           0
@@ -122,10 +122,10 @@
 #define KV_L 3.0f
 #endif
 #ifndef KS_R
-#define KS_R 70.0f
+#define KS_R 72.0f
 #endif
 #ifndef KV_R
-#define KV_R 3.0f
+#define KV_R 3.1f
 #endif
 
 // Gate to disable FF quickly if needed
