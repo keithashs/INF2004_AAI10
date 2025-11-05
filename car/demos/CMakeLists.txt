@@ -178,6 +178,8 @@ target_include_directories(testDemo3 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../encoder
     ${CMAKE_CURRENT_LIST_DIR}/../imu
     ${CMAKE_CURRENT_LIST_DIR}/../pid
+    ${CMAKE_CURRENT_LIST_DIR}/../ultrasonic
+    ${CMAKE_CURRENT_LIST_DIR}/../servo
     ${CMAKE_SOURCE_DIR}/freertos_config
     ${PICO_SDK_PATH}/src/rp2_common/pico_lwip/include
 
@@ -185,14 +187,16 @@ target_include_directories(testDemo3 PRIVATE
 
 target_link_libraries(testDemo3
     pico_stdlib
-    pico_cyw43_arch_lwip_sys_freertos
-    pico_lwip_mqtt
+    # pico_cyw43_arch_lwip_sys_freertos
+    # pico_lwip_mqtt
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
     encoder_lib
     motor_lib
     # barcode_lib
     imu_lib
+    ultrasonic_lib
+    servo_lib
     hardware_gpio
     hardware_pwm
     hardware_timer

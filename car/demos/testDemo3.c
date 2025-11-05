@@ -1,238 +1,393 @@
-// One-file: Curved line-follow + Code39 decisions (AO on GP28, DO on GP27)
-// Patched: local PWM governor + safe steering scale + bend-aware base + tight slew
+// ==============================
+// demo2.c — IR Line Follow (ADC) + Width Scan on Obstacle
+// ==============================
+// - Keeps your exact demo2 ADC-only line-follow logic
+// - When the ultrasonic at center (90°) detects an obstacle within threshold,
+//   it pauses the robot, runs the edge-scan refinement from test_obstacle_width_cosine.c
+//   to measure LEFT and RIGHT widths, prints results, then resumes line-follow.
+// - Uses your calibrated headers (servo.h, ultrasonic.h, motor/encoder) as-is.
+// ==============================
+
 #include <stdio.h>
+#include <stdbool.h>
 #include <math.h>
+
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
+
 #include "FreeRTOS.h"
 #include "task.h"
 
-// --- Motor & barcode (your code) ---
-#include "motor.h"        // forward_motor_manual(), turn_motor_manual(...)
-#ifndef IR_SENSOR_PIN
-#define IR_SENSOR_PIN 27  // barcode DO GPIO (your second IR module)
+#include "motor.h"
+#include "encoder.h"
+#include "servo.h"
+#include "ultrasonic.h"
+
+// ======== demo2v4 CONFIG (unchanged) ========
+#ifndef LINE_SENSOR_PIN
+#define LINE_SENSOR_PIN 28           // GPIO28 -> ADC2
 #endif
-#include "barcode.h"      // barcode_init(), init_barcode_irq(), decoded_barcode_char, is_scanning_allowed
 
-// ====================== Pins ======================
-#define LINE_SENSOR_AO     28   // GP28 ADC2 (your line sensor AO)
-#define LINE_SENSOR_ADC_CH 2    // ADC input 2
+#ifndef FOLLOW_WHITE
+#define FOLLOW_WHITE 0
+#endif
 
-// ====================== Tunables ======================
-// Line calibration (from your Step 1 values; update if lighting changes)
-static float LINE_WHITE = 0.06f;   // white floor reflectance
-static float LINE_BLACK = 0.85f;   // black line reflectance
+#ifndef TH_LO
+#define TH_LO   600
+#endif
+#ifndef TH_HI
+#define TH_HI   3000
+#endif
 
-// PD steering (gentle defaults)
-#define KP_STEER           10.0f
-#define KD_STEER           1.2f
-#define ERR_LPF_ALPHA      0.18f   // 0..1 (lower = smoother)
-#define STEER_GAIN_PWM     1.20f   // converts steer "units" to PWM counts
+#ifndef SLOW_SPEED_CMPS
+#define SLOW_SPEED_CMPS 2.0f
+#endif
 
-// Base PWM around mid (we’re not using wheel-speed PID here)
-#define PWM_BASE_LEFT     100
-#define PWM_BASE_RIGHT    100
+#ifndef SEARCH_PWM
+#define SEARCH_PWM 50
+#endif
+#ifndef STEER_DURATION
+#define STEER_DURATION 80
+#endif
+#ifndef DEBOUNCE_DELAY_MS
+#define DEBOUNCE_DELAY_MS 100
+#endif
+#ifndef REVERSE_MS
+#define REVERSE_MS 80
+#endif
+#ifndef REACQUIRE_GOOD_SAMPLES
+#define REACQUIRE_GOOD_SAMPLES 3
+#endif
 
-// Global loop timing
-#define LOOP_DT_MS           10
-#define DT_S   ( (float)LOOP_DT_MS / 1000.0f )
+// ======== obstacle-width CONFIG ========
+#define OBSTACLE_THRESHOLD_CM           25.0f   // Trigger threshold
+#define SERVO_CENTER_ANGLE              90.0f
+#define SERVO_RIGHT_ANGLE               150.0f
+#define SERVO_LEFT_ANGLE                35.0f
+#define SERVO_SCAN_STEP_DEGREE          1.0f
+#define SERVO_REFINE_STEP_DEGREE        0.5f
+#define MEASUREMENT_DELAY_MS            50
+#define REFINEMENT_DELAY_MS             2000
+#define MAX_DETECTION_DISTANCE_CM       100.0f
+#define EDGE_CONFIRMATION_SAMPLES       5
+#define CONSISTENCY_THRESHOLD_CM        10.0f
 
-// Loss detection
-#define LOST_ERR_THRESH     1.05f
-#define LOST_TIME_MS         180
-#define SEARCH_PWM           300
-
-// Barcode turn
-#define TURN_ANGLE_DEG        90.0f
-#define TURN_PWM              220
-
-// =========== Local governor (DO NOT change motor.h; this only affects this file) ===========
-#define LOCAL_PWM_MIN_L     90
-#define LOCAL_PWM_MAX_L     120
-#define LOCAL_PWM_MIN_R     90
-#define LOCAL_PWM_MAX_R     120
-#define LOCAL_MAX_STEP        3     // extra-smooth ramps for line follow only
-#define BEND_SLOW_MAX        35     // up to -25 PWM as |ef|→1
-
-// ====================== Globals ======================
-extern volatile bool is_scanning_allowed; // from barcode.c
-extern char decoded_barcode_char;         // last decoded ASCII
-
-static float e_filt = 0.0f, e_prev = 0.0f;
-static int lastL = PWM_MIN_LEFT, lastR = PWM_MIN_RIGHT;
-static uint32_t sat_since_ms = 0;
-
-// ====================== Helpers ======================
-static inline float clampf(float v, float lo, float hi){ return v<lo?lo:(v>hi?hi:v); }
-static inline int   clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
-static inline float adc_norm(uint16_t raw){ return (float)raw / 4095.0f; }
-
-static inline float line_error_from_reflect(float r){
-    float mid  = 0.5f*(LINE_BLACK + LINE_WHITE);
-    float span = fmaxf(0.05f, (LINE_BLACK - LINE_WHITE));
-    float e = (r - mid) / (0.5f*span);         // ~[-1,+1]
-    return clampf(e, -1.2f, +1.2f);
+// ============== ADC init & helpers ==============
+static inline void init_line_adc(void) {
+    adc_init();
+    adc_gpio_init(LINE_SENSOR_PIN);
+    adc_select_input(2); // GPIO28 -> ADC2
 }
 
-static inline bool is_right_letter(char c){
-    // Right: A,C,E,G,I,K,M,O,Q,S,U,W,Y
-    switch (c){
-        case 'A': case 'C': case 'E': case 'G': case 'I': case 'K':
-        case 'M': case 'O': case 'Q': case 'S': case 'U': case 'W': case 'Y':
-            return true;
-        default: return false;
+// Hysteresis: return true if sensor is on target color (demo2)
+static inline bool adc_on_track(uint16_t v) {
+    static bool state = false;
+#if FOLLOW_WHITE
+    if (v <= TH_LO)      state = true;    // on white
+    else if (v >= TH_HI) state = false;   // off (black)
+#else
+    if (v >= TH_HI)      state = true;    // on black
+    else if (v <= TH_LO) state = false;   // off (white)
+#endif
+    return state;
+}
+
+// Pivot + poll ADC (demo2v4)
+static bool search_pivot_and_probe(bool want_left, uint32_t ms) {
+    disable_pid_control(); // manual control during search
+    turn_motor_manual(want_left ? 0 /*LEFT*/ : 1 /*RIGHT*/,
+                      CONTINUOUS_TURN, SEARCH_PWM, SEARCH_PWM);
+
+    const uint64_t start = time_us_64();
+    const uint64_t limit = (uint64_t)ms * 1000ULL;
+    int good = 0;
+
+    while ((time_us_64() - start) < limit) {
+        uint16_t raw = adc_read();
+        if (adc_on_track(raw)) {
+            if (++good >= REACQUIRE_GOOD_SAMPLES) {
+                stop_motor_pid();
+                return true;
+            }
+        } else {
+            good = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
+
+    stop_motor_pid();
+    vTaskDelay(pdMS_TO_TICKS(40));
+    return false;
 }
-static inline bool is_left_letter(char c){
-    // Left: B,D,F,H,J,L,N,P,R,T,V,X,Z
-    switch (c){
-        case 'B': case 'D': case 'F': case 'H': case 'J': case 'L':
-        case 'N': case 'P': case 'R': case 'T': case 'V': case 'X': case 'Z':
-            return true;
-        default: return false;
+
+// ============== Obstacle width helpers (from test_obstacle_width_cosine.c) ==============
+
+static float calculate_width_component(float adjacent, float hypotenuse) {
+    float h2 = hypotenuse * hypotenuse;
+    float a2 = adjacent   * adjacent;
+    if (h2 <= a2) {
+        printf("    [WARNING] Hypotenuse (%.2f) <= adjacent (%.2f), returning 0\n", 
+               hypotenuse, adjacent);
+        return 0.0f;
     }
+    return sqrtf(h2 - a2);
 }
 
-// ====================== Tasks ======================
-static void vBarcodeEventTask(void *pv){
-    (void)pv;
-    char last = 0;
+static bool take_consistent_samples(float *avg_distance_out) {
+    float samples[EDGE_CONFIRMATION_SAMPLES];
+    int valid = 0;
 
-    for(;;){
-        if (decoded_barcode_char != 0 && decoded_barcode_char != last){
-            last = decoded_barcode_char;
-            printf("[BARCODE] %c\n", last);
+    for (int i = 0; i < EDGE_CONFIRMATION_SAMPLES; i++) {
+        sleep_ms(100);
+        float s = ultrasonic_get_distance_cm();
+        if (s > 0 && s <= MAX_DETECTION_DISTANCE_CM) {
+            samples[valid++] = s;
+            printf("      Sample %d: %.2f cm\n", i + 1, s);
+        } else {
+            printf("      Sample %d: invalid\n", i + 1);
+        }
+    }
+    if (valid < 3) return false;
 
-            // Pause line-follow scan briefly while we act
-            is_scanning_allowed = false;
+    float mn = 1e9f, mx = 0.f, sum = 0.f;
+    for (int i = 0; i < valid; i++) {
+        sum += samples[i];
+        if (samples[i] < mn) mn = samples[i];
+        if (samples[i] > mx) mx = samples[i];
+    }
+    float var = mx - mn;
+    *avg_distance_out = sum / valid;
+    return (var <= CONSISTENCY_THRESHOLD_CM);
+}
 
-            // Decide & turn
-            if (is_right_letter(last)){
-                printf("[ACTION] TURN RIGHT 90\n");
-                turn_motor_manual(/*RIGHT*/1, TURN_ANGLE_DEG, TURN_PWM, TURN_PWM);
-            } else if (is_left_letter(last)){
-                printf("[ACTION] TURN LEFT 90\n");
-                turn_motor_manual(/*LEFT*/0, TURN_ANGLE_DEG, TURN_PWM, TURN_PWM);
+static float scan_left_side(float adjacent) {
+    printf("\n[LEFT_SCAN] Waiting 2 seconds before scanning...\n");
+    sleep_ms(2000);
+    printf("[LEFT_SCAN] Starting from 35° scanning toward 90°...\n");
+    printf("[LEFT_SCAN] Looking for ECHO (edge detection)...\n");
+    printf("[LEFT_SCAN] Angle │ Status\n");
+    printf("[LEFT_SCAN] ──────┼────────────────\n");
+
+    float current_angle = SERVO_LEFT_ANGLE;
+    bool  edge_found = false;
+    float edge_distance = 0.0f;
+
+    while (current_angle <= SERVO_CENTER_ANGLE && !edge_found) {
+        servo_set_angle(current_angle);
+        sleep_ms(MEASUREMENT_DELAY_MS);
+
+        float d = ultrasonic_get_distance_cm();
+        if (d > 0 && d <= MAX_DETECTION_DISTANCE_CM) {
+            printf("[LEFT_SCAN] %.1f° │ ✓ ECHO! Confirming...\n", current_angle);
+            float avg;
+            if (take_consistent_samples(&avg)) {
+                printf("[LEFT_SCAN] ✓✓ EDGE FOUND at %.1f°! Starting refinement...\n", current_angle);
+                edge_found = true;
+                edge_distance = avg;
+                break;
             } else {
-                printf("[ACTION] (no-op for %c)\n", last);
+                printf("[LEFT_SCAN] ✗ Inconsistent, continuing...\n");
+            }
+        } else {
+            printf("[LEFT_SCAN] %.1f° │ No echo\n", current_angle);
+        }
+        current_angle += SERVO_SCAN_STEP_DEGREE;
+    }
+    if (!edge_found) { printf("[LEFT_SCAN] No edge found!\n"); return 0.0f; }
+
+    printf("\n[LEFT_REFINE] Starting edge refinement (moving back toward 35°)...\n");
+    while (current_angle >= SERVO_LEFT_ANGLE) {
+        current_angle -= SERVO_REFINE_STEP_DEGREE;
+        servo_set_angle(current_angle);
+        printf("[LEFT_REFINE] Testing %.1f° (waiting 2s)...\n", current_angle);
+        sleep_ms(REFINEMENT_DELAY_MS);
+
+        float avg;
+        if (take_consistent_samples(&avg)) {
+            printf("[LEFT_REFINE] ✓ Still edge at %.1f°, avg: %.2f cm\n", current_angle, avg);
+            edge_distance = avg;
+        } else {
+            printf("[LEFT_REFINE] ✗ Edge lost! Final edge at %.1f°\n", current_angle + SERVO_REFINE_STEP_DEGREE);
+            current_angle += SERVO_REFINE_STEP_DEGREE;
+            break;
+        }
+    }
+
+    float left_width = calculate_width_component(adjacent, edge_distance);
+    printf("[LEFT_REFINE] Final edge angle: %.1f°\n", current_angle);
+    printf("[LEFT_REFINE] Final distance: %.2f cm\n", edge_distance);
+    printf("[LEFT_REFINE] LEFT width: %.2f cm\n", left_width);
+    return left_width;
+}
+
+static float scan_right_side(float adjacent) {
+    printf("\n[RIGHT_SCAN] Waiting 2 seconds before scanning...\n");
+    sleep_ms(2000);
+    printf("[RIGHT_SCAN] Starting from 150° scanning toward 90°...\n");
+    printf("[RIGHT_SCAN] Looking for ECHO (edge detection)...\n");
+    printf("[RIGHT_SCAN] Angle │ Status\n");
+    printf("[RIGHT_SCAN] ──────┼────────────────\n");
+
+    float current_angle = SERVO_RIGHT_ANGLE;
+    bool  edge_found = false;
+    float edge_distance = 0.0f;
+
+    while (current_angle >= SERVO_CENTER_ANGLE && !edge_found) {
+        servo_set_angle(current_angle);
+        sleep_ms(MEASUREMENT_DELAY_MS);
+
+        float d = ultrasonic_get_distance_cm();
+        if (d > 0 && d <= MAX_DETECTION_DISTANCE_CM) {
+            printf("[RIGHT_SCAN] %.1f° │ ✓ ECHO! Confirming...\n", current_angle);
+            float avg;
+            if (take_consistent_samples(&avg)) {
+                printf("[RIGHT_SCAN] ✓✓ EDGE FOUND at %.1f°! Starting refinement...\n", current_angle);
+                edge_found = true;
+                edge_distance = avg;
+                break;
+            } else {
+                printf("[RIGHT_SCAN] ✗ Inconsistent, continuing...\n");
+            }
+        } else {
+            printf("[RIGHT_SCAN] %.1f° │ No echo\n", current_angle);
+        }
+        current_angle -= SERVO_SCAN_STEP_DEGREE;
+    }
+    if (!edge_found) { printf("[RIGHT_SCAN] No edge found!\n"); return 0.0f; }
+
+    printf("\n[RIGHT_REFINE] Starting edge refinement (moving back toward 150°)...\n");
+    while (current_angle <= SERVO_RIGHT_ANGLE) {
+        current_angle += SERVO_REFINE_STEP_DEGREE;
+        servo_set_angle(current_angle);
+        printf("[RIGHT_REFINE] Testing %.1f° (waiting 2s)...\n", current_angle);
+        sleep_ms(REFINEMENT_DELAY_MS);
+
+        float avg;
+        if (take_consistent_samples(&avg)) {
+            printf("[RIGHT_REFINE] ✓ Still edge at %.1f°, avg: %.2f cm\n", current_angle, avg);
+            edge_distance = avg;
+        } else {
+            printf("[RIGHT_REFINE] ✗ Edge lost! Final edge at %.1f°\n", current_angle - SERVO_REFINE_STEP_DEGREE);
+            current_angle -= SERVO_REFINE_STEP_DEGREE;
+            break;
+        }
+    }
+
+    float right_width = calculate_width_component(adjacent, edge_distance);
+    printf("[RIGHT_REFINE] Final edge angle: %.1f°\n", current_angle);
+    printf("[RIGHT_REFINE] Final distance: %.2f cm\n", edge_distance);
+    printf("[RIGHT_REFINE] RIGHT width: %.2f cm\n", right_width);
+    return right_width;
+}
+
+static void run_width_scan_sequence(float adjacent) {
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                 *** OBSTACLE DETECTED ***                          ║\n");
+    printf("║           Perpendicular Distance: %.2f cm (adjacent)               ║\n", adjacent);
+    printf("╚════════════════════════════════════════════════════════════════════╝\n");
+
+    servo_set_angle(SERVO_CENTER_ANGLE);
+    sleep_ms(500);
+
+    float left_w  = scan_left_side(adjacent);
+    sleep_ms(500);
+    float right_w = scan_right_side(adjacent);
+
+    float total_w = left_w + right_w;
+    printf("\n[RESULT] LEFT=%.2f cm, RIGHT=%.2f cm  →  TOTAL WIDTH=%.2f cm\n",
+           left_w, right_w, total_w);
+
+    servo_set_angle(SERVO_CENTER_ANGLE);
+    sleep_ms(300);
+}
+
+// ============== Line-follow Task (demo2v4) with obstacle hook ==============
+static void lineFollowTask(void *pvParameters) {
+    (void)pvParameters;
+
+    int last_turn_dir = 0;
+    uint32_t first_ms  = STEER_DURATION;
+    uint32_t second_ms = STEER_DURATION + 60;
+    bool needs_second  = false;
+
+    printf("[LF] ADC-only line-follow. Speed=%.1f cm/s, TH_LO=%d, TH_HI=%d, FOLLOW_%s\n",
+           SLOW_SPEED_CMPS, TH_LO, TH_HI, FOLLOW_WHITE ? "WHITE" : "BLACK");
+
+    uint64_t last_decide = 0;
+
+    for (;;) {
+        const uint64_t now = time_us_64();
+        if (now - last_decide < (uint64_t)DEBOUNCE_DELAY_MS * 1000ULL) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        last_decide = now;
+
+        // --- New: quick obstacle check at center ---
+        servo_set_angle(SERVO_CENTER_ANGLE);
+        float center_cm = ultrasonic_get_distance_cm();
+        if (center_cm > 0.0f && center_cm <= OBSTACLE_THRESHOLD_CM) {
+            stop_motor_pid();
+            run_width_scan_sequence(center_cm);
+        }
+
+        uint16_t raw = adc_read();
+        bool on_track = adc_on_track(raw);
+
+        if (on_track) {
+            forward_motor_pid(SLOW_SPEED_CMPS);
+            first_ms  = STEER_DURATION;
+            second_ms = STEER_DURATION + 60;
+            needs_second = false;
+
+        } else {
+            stop_motor_pid();
+            reverse_motor_manual(130, 130);
+            vTaskDelay(pdMS_TO_TICKS(REVERSE_MS));
+
+            int prefer_dir = last_turn_dir;
+            bool found = false;
+            if (!needs_second) {
+                found = search_pivot_and_probe(prefer_dir == 0, first_ms);
+                needs_second = !found;
+                if (found) last_turn_dir = prefer_dir;
+            } else {
+                int alt_dir = 1 - prefer_dir;
+                found = search_pivot_and_probe(alt_dir == 0, second_ms);
+                needs_second = false;
+                if (found) last_turn_dir = alt_dir;
             }
 
-            // Clear decoded char and resume scanning
-            decoded_barcode_char = 0;
-            is_scanning_allowed = true;
+            if (!found) {
+                if (first_ms  < 500) first_ms  += 70;
+                if (second_ms < 520) second_ms += 70;
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
 
-static void vLineFollowTask(void *pv){
-    (void)pv;
-
-    // --- ADC init (GP28/ADC2) ---
-    adc_init();
-    adc_gpio_init(LINE_SENSOR_AO);
-    adc_select_input(LINE_SENSOR_ADC_CH);
-
-    // Print config once to verify the build uses these numbers
-    printf("[CFG] KP=%.2f KD=%.2f G=%.2f ALPHA=%.2f LOCAL[L:%d..%d R:%d..%d] MAXSTEP=%d\n",
-           (double)KP_STEER, (double)KD_STEER, (double)STEER_GAIN_PWM,
-           (double)ERR_LPF_ALPHA,
-           LOCAL_PWM_MIN_L, LOCAL_PWM_MAX_L, LOCAL_PWM_MIN_R, LOCAL_PWM_MAX_R, LOCAL_MAX_STEP);
-
-    TickType_t last_wake = xTaskGetTickCount();
-
-    for(;;){
-        // 1) Read reflectance and map to signed error
-        uint16_t raw = adc_read();
-        float r = adc_norm(raw);
-        float e = line_error_from_reflect(r);
-
-        // 2) Filter + derivative
-        e_filt = (1.0f - ERR_LPF_ALPHA)*e_filt + ERR_LPF_ALPHA*e;
-        float de_dt = (e_filt - e_prev)/DT_S;
-        e_prev = e_filt;
-
-        // 3) PD steering (PWM domain) + hard clamp
-        float steer_cmd = KP_STEER*e_filt + KD_STEER*de_dt;
-        float dPWM = STEER_GAIN_PWM * steer_cmd;
-
-        // Clamp steering to ~30% of the smaller global span
-        const int spanL = PWM_MAX_LEFT  - PWM_MIN_LEFT;
-        const int spanR = PWM_MAX_RIGHT - PWM_MIN_RIGHT;
-        const float dmax = 0.30f * (float)((spanL < spanR) ? spanL : spanR);
-        if (dPWM >  dmax) dPWM =  dmax;
-        if (dPWM < -dmax) dPWM = -dmax;
-
-        // 3b) Bend-aware base speed (slow down up to BEND_SLOW_MAX when |ef|→1)
-        int baseL = PWM_BASE_LEFT;
-        int baseR = PWM_BASE_RIGHT;
-        int bend_slow = (int)lroundf(BEND_SLOW_MAX * fminf(1.0f, fabsf(e_filt)));
-        baseL -= bend_slow;
-        baseR -= bend_slow;
-
-        int pwmL = baseL - (int)lroundf(dPWM);
-        int pwmR = baseR + (int)lroundf(dPWM);
-
-        // 4) Line-loss detection (sustained saturation of |ef|)
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (fabsf(e_filt) > LOST_ERR_THRESH) {
-            if (!sat_since_ms) sat_since_ms = now;
-        } else {
-            sat_since_ms = 0;
-        }
-        if (sat_since_ms && (now - sat_since_ms) > LOST_TIME_MS){
-            // slow pivot search toward last seen side
-            if (e_filt > 0) { pwmL = -SEARCH_PWM; pwmR =  SEARCH_PWM; }
-            else            { pwmL =  SEARCH_PWM; pwmR = -SEARCH_PWM; }
-        }
-
-        // 5) LOCAL clamps + LOCAL slew (so Demo1 stays unchanged)
-        if (pwmL < LOCAL_PWM_MIN_L) pwmL = LOCAL_PWM_MIN_L;
-        if (pwmL > LOCAL_PWM_MAX_L) pwmL = LOCAL_PWM_MAX_L;
-        if (pwmR < LOCAL_PWM_MIN_R) pwmR = LOCAL_PWM_MIN_R;
-        if (pwmR > LOCAL_PWM_MAX_R) pwmR = LOCAL_PWM_MAX_R;
-
-        int dL = pwmL - lastL, dR = pwmR - lastR;
-        if (dL >  LOCAL_MAX_STEP) pwmL = lastL + LOCAL_MAX_STEP;
-        if (dL < -LOCAL_MAX_STEP) pwmL = lastL - LOCAL_MAX_STEP;
-        if (dR >  LOCAL_MAX_STEP) pwmR = lastR + LOCAL_MAX_STEP;
-        if (dR < -LOCAL_MAX_STEP) pwmR = lastR - LOCAL_MAX_STEP;
-
-        // 6) Finally, apply global safety clamps from motor.h and drive
-        pwmL = clampi(pwmL, PWM_MIN_LEFT,  PWM_MAX_LEFT);
-        pwmR = clampi(pwmR, PWM_MIN_RIGHT, PWM_MAX_RIGHT);
-
-        forward_motor_manual(pwmL, pwmR);
-
-        lastL = pwmL; lastR = pwmR;
-
-        // 7) Debug (10 Hz)
-        static int div=0;
-        if ((div++ % (1000/LOOP_DT_MS/10))==0){
-            printf("[LINE] raw=%u r=%.2f e=%.2f ef=%.2f dPWM=%.1f  PWM[L=%d R=%d]\n",
-                   raw, (double)r, (double)e, (double)e_filt, (double)dPWM, pwmL, pwmR);
-        }
-
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LOOP_DT_MS));
-    }
-}
-
-int main(void){
+// ======== Main ========
+int main(void) {
     stdio_init_all();
-    sleep_ms(600);
+    sleep_ms(400);
 
-    // Motors
-    motor_init();         // sets up PWM on GP11/10/8/9 and starts PID task
-    disable_pid_control();// ensure manual forward() isn’t overridden by pid_task
+    init_line_adc();
+    encoder_init();
+    motor_init();
 
-    // Barcode (GPIO27 interrupts + FreeRTOS worker)
-    barcode_init();       // creates semaphore/task; sets is_scanning_allowed=true
-    init_barcode_irq();   // attach ISR on IR_SENSOR_PIN (27)
+    servo_init();
+    ultrasonic_init();
+    servo_set_angle(SERVO_CENTER_ANGLE);
 
-    // Tasks
-    xTaskCreate(vLineFollowTask,  "LineFollow",  2048, NULL, tskIDLE_PRIORITY + 2, NULL);
-    xTaskCreate(vBarcodeEventTask,"BarcodeEvt",  1024, NULL, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(lineFollowTask, "LineFollow",
+                configMINIMAL_STACK_SIZE * 5,
+                NULL, tskIDLE_PRIORITY + 1, NULL);
 
+    printf("[MAIN] IR line-follow + width-scan ready.\n");
     vTaskStartScheduler();
     while (true) { tight_loop_contents(); }
+    return 0;
 }

@@ -37,14 +37,14 @@
 
 // Crawl speed for PID
 #ifndef SLOW_SPEED_CMPS
-#define SLOW_SPEED_CMPS 2.0f
+#define SLOW_SPEED_CMPS 2.0f // drifts left line increase | drifts right negative
 #endif
 
 // Straightness correction (from your demo2.c tuning)
 // +WHEEL_TRIM => LEFT slightly faster / RIGHT slightly slower (helps when car drifts LEFT)
 // -WHEEL_TRIM => RIGHT faster / LEFT slower (helps when car drifts RIGHT)
 #ifndef WHEEL_TRIM
-#define WHEEL_TRIM (+0.05f)
+#define WHEEL_TRIM (+0.02f)
 #endif
 
 // Search behaviour
@@ -52,13 +52,13 @@
 #define SEARCH_PWM 50
 #endif
 #ifndef STEER_DURATION
-#define STEER_DURATION 70
+#define STEER_DURATION 80
 #endif
 #ifndef DEBOUNCE_DELAY_MS
-#define DEBOUNCE_DELAY_MS 120
+#define DEBOUNCE_DELAY_MS 100
 #endif
 #ifndef REVERSE_MS
-#define REVERSE_MS 90
+#define REVERSE_MS 80
 #endif
 #ifndef REACQUIRE_GOOD_SAMPLES
 #define REACQUIRE_GOOD_SAMPLES 3
