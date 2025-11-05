@@ -13,17 +13,38 @@
 #include <math.h>
 
 #include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
 #include "hardware/adc.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
+#include "semphr.h"
+
+#include "lwip/err.h"
+#include "lwip/ip_addr.h"
+#include "lwip/inet.h"
+#include "lwip/dns.h"
+#include "lwip/apps/mqtt.h"
 
 #include "motor.h"
 #include "encoder.h"
 #include "servo.h"
 #include "ultrasonic.h"
 
-// ======== demo2v4 CONFIG (unchanged) ========
+// ======== demo2 CONFIG (unchanged) ========
+// --- Wi-Fi & MQTT ---
+#define WIFI_SSID                 "Keithiphone"
+#define WIFI_PASS                 "testong1"
+// #define WIFI_SSID                 "Bin10"
+// #define WIFI_PASS                 "6370lI2052"
+#define WIFI_CONNECT_TIMEOUT_MS   20000
+
+#define BROKER_IP_STR             "172.20.10.2"
+#define BROKER_PORT               1883
+#define MQTT_TOPIC_TELEM          "pico/demo3/telemetry"
+#define MQTT_TOPIC_OBSTACLE       "pico/demo3/obstacle"
+
 #ifndef LINE_SENSOR_PIN
 #define LINE_SENSOR_PIN 28           // GPIO28 -> ADC2
 #endif
@@ -280,6 +301,98 @@ static float scan_right_side(float adjacent) {
     return right_width;
 }
 
+/* ============================ Wi-Fi / MQTT ========================= */
+static mqtt_client_t *g_mqtt = NULL;
+static ip_addr_t      g_broker_ip;
+static SemaphoreHandle_t g_mqtt_mutex;
+
+// Add a global flag
+static volatile bool g_shutdown = false;
+
+// Call this when you want to exit cleanly (button press, RPC, etc.)
+static void mqtt_disconnect_now(void){
+    if (!g_mqtt) return;
+    // Tell lwIP we're about to touch the stack
+    cyw43_arch_lwip_begin();
+    mqtt_disconnect(g_mqtt);     // Sends MQTT DISCONNECT then closes TCP
+    cyw43_arch_lwip_end();
+
+    // Optional: give time for TCP close handshake
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+// Example: trigger shutdown from anywhere
+static void request_shutdown(void){
+    g_shutdown = true;
+}
+
+static void mqtt_pub_cb(void *arg, err_t result){ (void)arg; (void)result; }
+static void mqtt_conn_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status){
+    (void)client; (void)arg;
+    if (status == MQTT_CONNECT_ACCEPTED) printf("[MQTT] Connected\n");
+    else printf("[MQTT] Disconnected status=%d\n", (int)status);
+}
+static bool wifi_connect_blocking(uint32_t timeout_ms){
+    printf("[NET] Connecting to Wi-Fi SSID: %s\n", WIFI_SSID);
+    int err = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS,
+                                                 CYW43_AUTH_WPA2_AES_PSK, timeout_ms);
+    if (err){ printf("[NET] Wi-Fi connect failed (err=%d)\n", err); return false; }
+    printf("[NET] Wi-Fi connected\n"); return true;
+}
+static bool mqtt_connect_blocking(void){
+    if (!g_mqtt) g_mqtt = mqtt_client_new();
+    if (!g_mqtt){ printf("[MQTT] client_new failed\n"); return false; }
+
+    struct mqtt_connect_client_info_t ci = {0};
+    ci.client_id  = "pico-demo3";
+    ci.keep_alive = 30;
+
+    err_t er = mqtt_client_connect(g_mqtt, &g_broker_ip, BROKER_PORT, mqtt_conn_cb, NULL, &ci);
+    if (er != ERR_OK){ printf("[MQTT] connect err=%d\n", er); return false; }
+    vTaskDelay(pdMS_TO_TICKS(500));
+    return mqtt_client_is_connected(g_mqtt);
+}
+static bool mqtt_is_connected(void){ return g_mqtt && mqtt_client_is_connected(g_mqtt); }
+static err_t mqtt_publish_str(const char *topic, const char *payload){
+    if (!mqtt_is_connected()) return ERR_CONN;
+    if (g_mqtt_mutex) xSemaphoreTake(g_mqtt_mutex, portMAX_DELAY);
+    cyw43_arch_lwip_begin();
+    err_t r = mqtt_publish(g_mqtt, topic, (const u8_t*)payload, (u16_t)strlen(payload),
+                           0 /*qos0*/, 0 /*retain*/, mqtt_pub_cb, NULL);
+    cyw43_arch_lwip_end();
+    if (g_mqtt_mutex) xSemaphoreGive(g_mqtt_mutex);
+    return r;
+}
+static void vNetworkTask(void *param){
+    (void)param;
+
+    if (cyw43_arch_init()){ printf("[NET] cyw43 init failed\n"); vTaskDelete(NULL); }
+    cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
+    cyw43_arch_enable_sta_mode();
+
+    while (!wifi_connect_blocking(WIFI_CONNECT_TIMEOUT_MS)){
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    ip4_addr_set_u32(ip_2_ip4(&g_broker_ip), ipaddr_addr(BROKER_IP_STR));
+    printf("[NET] Broker %s:%d\n", BROKER_IP_STR, BROKER_PORT);
+
+    for (;;){
+        if (g_shutdown){
+            mqtt_disconnect_now();
+            break; // exit task
+        }
+
+        if (!mqtt_is_connected()){
+            printf("[MQTT] Connecting...\n");
+            (void)mqtt_connect_blocking();
+        }
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(750));
+    }
+}
+
 static void run_width_scan_sequence(float adjacent) {
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════════╗\n");
@@ -297,12 +410,35 @@ static void run_width_scan_sequence(float adjacent) {
     float total_w = left_w + right_w;
     printf("\n[RESULT] LEFT=%.2f cm, RIGHT=%.2f cm  →  TOTAL WIDTH=%.2f cm\n",
            left_w, right_w, total_w);
-
+    
+    // *** NEW: Publish obstacle width data to MQTT ***
+    if (mqtt_is_connected()) {
+        char json[200];
+        uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
+        int n = snprintf(json, sizeof(json),
+            "{\"ts\":%u,\"adjacent\":%.2f,\"leftWidth\":%.2f,\"rightWidth\":%.2f,\"totalWidth\":%.2f}",
+            (unsigned)ts_ms,
+            (double)adjacent,
+            (double)left_w,
+            (double)right_w,
+            (double)total_w);
+        
+        if (n > 0 && n < (int)sizeof(json)) {
+            err_t r = mqtt_publish_str(MQTT_TOPIC_OBSTACLE, json);
+            if (r == ERR_OK) {
+                printf("[MQTT] Published obstacle data: %s\n", json);
+            } else {
+                printf("[MQTT] Publish failed, err=%d\n", r);
+            }
+        }
+    } else {
+        printf("[MQTT] Not connected, skipping telemetry publish\n");
+    }
     servo_set_angle(SERVO_CENTER_ANGLE);
     sleep_ms(300);
 }
 
-// ============== Line-follow Task (demo2v4) with obstacle hook ==============
+// ============== Line-follow Task (demo2) with obstacle hook ==============
 static void lineFollowTask(void *pvParameters) {
     (void)pvParameters;
 
@@ -381,6 +517,11 @@ int main(void) {
     servo_init();
     ultrasonic_init();
     servo_set_angle(SERVO_CENTER_ANGLE);
+
+    g_mqtt_mutex = xSemaphoreCreateMutex();
+
+    // Start network task (Wi-Fi + MQTT reconnect loop)
+    xTaskCreate(vNetworkTask, "net", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
 
     xTaskCreate(lineFollowTask, "LineFollow",
                 configMINIMAL_STACK_SIZE * 5,

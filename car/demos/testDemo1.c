@@ -414,7 +414,7 @@ static void vDriveTask(void *pvParameters) {
 int main(void){
     stdio_init_all();
     setvbuf(stdout, NULL, _IONBF, 0);
-    sleep_ms(10000);
+    sleep_ms(5000);
 
     printf("\n[BOOT] demo1_networked: HeadingPID(%.2f/%.2f/%.2f)  SpeedPID(%.2f/%.2f/%.2f)\n",
            (double)KP_HEADING, (double)KI_HEADING, (double)KD_HEADING,
