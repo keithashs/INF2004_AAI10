@@ -53,7 +53,7 @@
 
 // --- Target speed ---
 #ifndef V_TARGET_MPS
-#define V_TARGET_MPS         0.20f
+#define V_TARGET_MPS         0.10f
 #endif
 #define V_TARGET_CMPS        (V_TARGET_MPS * 100.0f)
 

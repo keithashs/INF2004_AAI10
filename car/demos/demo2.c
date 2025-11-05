@@ -67,19 +67,19 @@
 
 // Search behaviour
 #ifndef SEARCH_PWM
-#define SEARCH_PWM 50
+#define SEARCH_PWM 60
 #endif
 #ifndef STEER_DURATION
 #define STEER_DURATION 80
 #endif
 #ifndef DEBOUNCE_DELAY_MS
-#define DEBOUNCE_DELAY_MS 100
+#define DEBOUNCE_DELAY_MS 80
 #endif
 #ifndef REVERSE_MS
 #define REVERSE_MS 80
 #endif
 #ifndef REACQUIRE_GOOD_SAMPLES
-#define REACQUIRE_GOOD_SAMPLES 3
+#define REACQUIRE_GOOD_SAMPLES 5
 #endif
 
 // ======== ADC init & helpers ========
@@ -310,7 +310,7 @@ static void lineFollowTask(void *pvParameters) {
         } else {
             // LOST: back off, then search with trim still applied
             stop_motor_pid();
-            reverse_motor_manual(120, 120);
+            reverse_motor_manual(100, 100);
             vTaskDelay(pdMS_TO_TICKS(REVERSE_MS));
 
             int prefer_dir = last_turn_dir;
