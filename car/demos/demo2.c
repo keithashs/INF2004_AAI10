@@ -1,10 +1,9 @@
 // ==============================
-// IR Line Follow + Wheel Trim
+// IR Edge Following with Aggressive Corner Response
 // ==============================
-// - Primary sensor: ADC on GPIO28 (ADC2)
-// - Hysteresis thresholds: TH_LO, TH_HI
-// - Follows BLACK by default; set FOLLOW_WHITE=1 to follow white
-// - Integrates WHEEL_TRIM from straight calibration to maintain straightness
+// - Sensor: ADC on GPIO28 (ADC2)
+// - Exponential steering gain for sharp corners
+// - Maintains smooth control on straights
 // ==============================
 
 #include <stdio.h>
@@ -40,123 +39,113 @@
 #define LINE_SENSOR_PIN 28           // GPIO28 -> ADC2
 #endif
 
-// Follow target color: 0 = BLACK on white floor (default), 1 = WHITE on black
-#ifndef FOLLOW_WHITE
-#define FOLLOW_WHITE 0
+// ======== EDGE FOLLOWING PARAMETERS ========
+#ifndef TARGET_EDGE_VALUE
+#define TARGET_EDGE_VALUE 1800
 #endif
 
-// Hysteresis thresholds (tune to your floor/tape)
-#ifndef TH_LO
-#define TH_LO   600      // definitely WHITE
-#endif
-#ifndef TH_HI
-#define TH_HI   3000     // definitely BLACK
+#ifndef BASE_SPEED_CMPS
+#define BASE_SPEED_CMPS 2.0f
 #endif
 
-// Crawl speed for PID
-#ifndef SLOW_SPEED_CMPS
-#define SLOW_SPEED_CMPS 2.0f // drifts left line increase | drifts right negative
+// PID gains for normal operation
+#ifndef KP_STEER
+#define KP_STEER 0.05f
 #endif
 
-// Straightness correction (from your demo2.c tuning)
-// +WHEEL_TRIM => LEFT slightly faster / RIGHT slightly slower (helps when car drifts LEFT)
-// -WHEEL_TRIM => RIGHT faster / LEFT slower (helps when car drifts RIGHT)
-#ifndef WHEEL_TRIM
-#define WHEEL_TRIM (+0.02f)
+#ifndef KI_STEER
+#define KI_STEER 0.0005f
 #endif
 
-// Search behaviour
-#ifndef SEARCH_PWM
-#define SEARCH_PWM 60
-#endif
-#ifndef STEER_DURATION
-#define STEER_DURATION 80
-#endif
-#ifndef DEBOUNCE_DELAY_MS
-#define DEBOUNCE_DELAY_MS 80
-#endif
-#ifndef REVERSE_MS
-#define REVERSE_MS 80
-#endif
-#ifndef REACQUIRE_GOOD_SAMPLES
-#define REACQUIRE_GOOD_SAMPLES 5
+#ifndef KD_STEER
+#define KD_STEER 0.012f
 #endif
 
-// ======== ADC init & helpers ========
+// INCREASED maximum steering correction
+#ifndef MAX_STEER_CORRECTION
+#define MAX_STEER_CORRECTION 2.0f  // INCREASED to allow aggressive corner turns
+#endif
+
+#ifndef ERROR_DEADBAND
+#define ERROR_DEADBAND 50
+#endif
+
+// PWM scaling
+#ifndef PWM_SCALE_FACTOR
+#define PWM_SCALE_FACTOR 25.0f  // Base scaling
+#endif
+
+// Corner detection and handling
+#ifndef CORNER_ERROR_THRESHOLD
+#define CORNER_ERROR_THRESHOLD 250  // Lower threshold for earlier detection
+#endif
+
+#ifndef CORNER_SPEED_REDUCTION
+#define CORNER_SPEED_REDUCTION 8  // Slow down MORE in corners
+#endif
+
+// Exponential steering gain for corners
+#ifndef CORNER_GAIN_MULTIPLIER
+#define CORNER_GAIN_MULTIPLIER 1.8f  // Multiply steering by this in corners
+#endif
+
+// Minimum PWM difference to ensure turning happens
+#ifndef MIN_CORNER_PWM_DIFF
+#define MIN_CORNER_PWM_DIFF 20  // Minimum difference between wheels in corners
+#endif
+
+// ======== ADC init ========
 static inline void init_line_adc(void) {
     adc_init();
     adc_gpio_init(LINE_SENSOR_PIN);
-    adc_select_input(2); // GPIO28 -> ADC2
+    adc_select_input(2);
 }
 
-// Hysteresis: return true if main sensor is on the target color
-static inline bool adc_on_track(uint16_t v) {
-    static bool state = false;
-#if FOLLOW_WHITE
-    if (v <= TH_LO)      state = true;    // on white
-    else if (v >= TH_HI) state = false;   // off (black)
-#else
-    if (v >= TH_HI)      state = true;    // on black
-    else if (v <= TH_LO) state = false;   // off (white)
-#endif
-    return state;
+// ======== PID Controller ========
+typedef struct {
+    float integral;
+    float prev_error;
+    float kp;
+    float ki;
+    float kd;
+} PIDController;
+
+static void pid_init(PIDController *pid, float kp, float ki, float kd) {
+    pid->integral = 0.0f;
+    pid->prev_error = 0.0f;
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
 }
 
-// ======== Trimmed forward helper ========
-// Applies your calibrated WHEEL_TRIM to manual PWM drive
-static inline uint16_t clamp_u16(int v, int lo, int hi){
-    if (v < lo) v = lo;
-    if (v > hi) v = hi;
-    return (uint16_t)v;
-}
-
-static void forward_with_trim_manual(int basePWM){
-    const int spanL = (PWM_MAX_LEFT  - PWM_MIN_LEFT);
-    const int spanR = (PWM_MAX_RIGHT - PWM_MIN_RIGHT);
-    int trimL = (int)( WHEEL_TRIM * 0.5f * spanL);
-    int trimR = (int)(-WHEEL_TRIM * 0.5f * spanR);
-    uint16_t pwmL = clamp_u16(basePWM + trimL, PWM_MIN_LEFT,  PWM_MAX_LEFT);
-    uint16_t pwmR = clamp_u16(basePWM + trimR, PWM_MIN_RIGHT, PWM_MAX_RIGHT);
-    forward_motor_manual(pwmL, pwmR);
-}
-
-// Pivot + poll ADC; exit early when we’ve seen N consecutive "on-track"
-static bool search_pivot_and_probe(bool want_left, uint32_t ms) {
-    disable_pid_control(); // manual control during search
-    turn_motor_manual(want_left ? 0 /*LEFT*/ : 1 /*RIGHT*/,
-                      CONTINUOUS_TURN, SEARCH_PWM, SEARCH_PWM);
-
-    const uint64_t start = time_us_64();
-    const uint64_t limit = (uint64_t)ms * 1000ULL;
-    int good = 0;
-
-    while ((time_us_64() - start) < limit) {
-        uint16_t raw = adc_read();
-        if (adc_on_track(raw)) {
-            if (++good >= REACQUIRE_GOOD_SAMPLES) {
-                stop_motor_pid();
-                return true;
-            }
-        } else {
-            good = 0;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
+static float pid_compute(PIDController *pid, float error, float dt) {
+    if (error > -ERROR_DEADBAND && error < ERROR_DEADBAND) {
+        error = 0.0f;
     }
-
-    stop_motor_pid();
-    vTaskDelay(pdMS_TO_TICKS(40));
-    return false;
+    
+    pid->integral += error * dt;
+    
+    const float max_integral = MAX_STEER_CORRECTION / (pid->ki + 0.0001f);
+    if (pid->integral > max_integral) pid->integral = max_integral;
+    if (pid->integral < -max_integral) pid->integral = -max_integral;
+    
+    float derivative = (error - pid->prev_error) / dt;
+    pid->prev_error = error;
+    
+    float output = pid->kp * error + pid->ki * pid->integral + pid->kd * derivative;
+    
+    if (output > MAX_STEER_CORRECTION) output = MAX_STEER_CORRECTION;
+    if (output < -MAX_STEER_CORRECTION) output = -MAX_STEER_CORRECTION;
+    
+    return output;
 }
 
 /* ============================ Wi-Fi / MQTT ========================= */
 static mqtt_client_t *g_mqtt = NULL;
 static ip_addr_t      g_broker_ip;
 static SemaphoreHandle_t g_mqtt_mutex;
-
-// Shutdown flag for clean exit
 static volatile bool g_shutdown = false;
 
-// Clean disconnect
 static void mqtt_disconnect_now(void){
     if (!g_mqtt) return;
     cyw43_arch_lwip_begin();
@@ -264,106 +253,141 @@ static void vNetworkTask(void *param){
     vTaskDelete(NULL);
 }
 
-// ======== Line-follow Task (ADC-only) ========
-static void lineFollowTask(void *pvParameters) {
+static inline int clamp_pwm_left(int v) {
+    if (v < PWM_MIN_LEFT) v = PWM_MIN_LEFT;
+    if (v > PWM_MAX_LEFT) v = PWM_MAX_LEFT;
+    return v;
+}
+
+static inline int clamp_pwm_right(int v) {
+    if (v < PWM_MIN_RIGHT) v = PWM_MIN_RIGHT;
+    if (v > PWM_MAX_RIGHT) v = PWM_MAX_RIGHT;
+    return v;
+}
+
+static inline float abs_float(float x) {
+    return x < 0 ? -x : x;
+}
+
+// ======== Edge Following Task with Exponential Corner Gain ========
+static void edgeFollowTask(void *pvParameters) {
     (void)pvParameters;
-
-    int last_turn_dir = 0;        // 0 = Left, 1 = Right (remember last success)
-    uint32_t first_ms  = STEER_DURATION;
-    uint32_t second_ms = STEER_DURATION + 60;
-    bool needs_second  = false;
-
-    printf("[LF] ADC-only line-follow + WHEEL_TRIM = %+.3f\n", (double)WHEEL_TRIM);
-    printf("     Speed=%.1f cm/s, TH_LO=%d, TH_HI=%d, FOLLOW_%s\n",
-           SLOW_SPEED_CMPS, TH_LO, TH_HI, FOLLOW_WHITE ? "WHITE" : "BLACK");
-
-    uint64_t last_decide = 0;
-    int telem_counter = 0;  // For periodic telemetry
-
+    
+    PIDController steer_pid;
+    pid_init(&steer_pid, KP_STEER, KI_STEER, KD_STEER);
+    
+    printf("[EDGE] Aggressive corner following initialized\n");
+    printf("     Target: %d, Corner threshold: %d\n", 
+           TARGET_EDGE_VALUE, CORNER_ERROR_THRESHOLD);
+    printf("     Corner gain multiplier: %.1fx\n", (double)CORNER_GAIN_MULTIPLIER);
+    
+    uint64_t last_time = time_us_64();
+    int telem_counter = 0;
+    
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
     for (;;) {
-        const uint64_t now = time_us_64();
-        if (now - last_decide < (uint64_t)DEBOUNCE_DELAY_MS * 1000ULL) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        last_decide = now;
-
-        uint16_t raw = adc_read();
-        bool on_track = adc_on_track(raw);
-
-        // Normal follow: apply PID drive + small trim bias
-            float vL = get_left_speed();
-            float vR = get_right_speed();
-
-        if (on_track) {
-            if (vL <= 0 || vR <= 0) {
-                // PID start assist: manual PWM crawl with trim
-                forward_with_trim_manual(PWM_MIN_LEFT + 25);
-            } else {
-                forward_motor_pid(SLOW_SPEED_CMPS);
-            }
-
-            first_ms  = STEER_DURATION;
-            second_ms = STEER_DURATION + 60;
-            needs_second = false;
-
-        } else {
-            // LOST: back off, then search with trim still applied
-            stop_motor_pid();
-            reverse_motor_manual(100, 100);
-            vTaskDelay(pdMS_TO_TICKS(REVERSE_MS));
-
-            int prefer_dir = last_turn_dir;
-            bool found = false;
-            if (!needs_second) {
-                found = search_pivot_and_probe(prefer_dir == 0, first_ms);
-                needs_second = !found;
-                if (found) last_turn_dir = prefer_dir;
-            } else {
-                int alt_dir = 1 - prefer_dir;
-                found = search_pivot_and_probe(alt_dir == 0, second_ms);
-                needs_second = false;
-                if (found) last_turn_dir = alt_dir;
-            }
-
-            if (!found) {
-                if (first_ms  < 500) first_ms  += 70;
-                if (second_ms < 520) second_ms += 70;
-            }
-        }
-        // Publish telemetry every ~10 iterations (~300ms)
-        if ((telem_counter++ % 10) == 0) {
-            const char *state_str = on_track ? "TRACK" : "SEARCH";
+        uint64_t now = time_us_64();
+        float dt = (now - last_time) / 1e6f;
+        if (dt < 0.001f) dt = 0.02f;
+        last_time = now;
+        
+        // Read ADC value
+        uint16_t adc_raw = adc_read();
+        
+        // Compute error
+        float error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
+        float abs_error = abs_float(error);
+        
+        // Detect corner
+        bool in_corner = (abs_error > CORNER_ERROR_THRESHOLD);
+        
+        // Compute base steering correction from PID
+        float steer_correction = pid_compute(&steer_pid, error, dt);
+        
+        // Apply exponential gain for corners
+        if (in_corner) {
+            // Calculate how far into corner we are (0 to 1)
+            float corner_intensity = (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
+            if (corner_intensity > 1.0f) corner_intensity = 1.0f;
             
-            printf("[LF] ADC=%u %s vL=%.1f vR=%.1f trim=%+.3f\n",
-                   raw, state_str, (double)vL, (double)vR, (double)WHEEL_TRIM);
+            // Apply exponential multiplier (1.0x to CORNER_GAIN_MULTIPLIER)
+            float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) * corner_intensity;
+            steer_correction *= gain;
+            
+            // Ensure we're turning enough
+            if (abs_float(steer_correction) < 0.5f) {
+                steer_correction = (error > 0) ? 0.5f : -0.5f;
+            }
+        }
+        
+        // Adaptive base speed
+        int base_pwm;
+        if (in_corner) {
+            base_pwm = PWM_MIN_LEFT + 10 - CORNER_SPEED_REDUCTION;
+            if (base_pwm < PWM_MIN_LEFT) base_pwm = PWM_MIN_LEFT;
+        } else {
+            base_pwm = PWM_MIN_LEFT + 10;
+        }
+        
+        // Apply steering correction with higher scaling in corners
+        float effective_scale = in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
+        int pwm_adjustment = (int)(steer_correction * effective_scale);
+        
+        int pwmL = base_pwm - pwm_adjustment;
+        int pwmR = base_pwm + pwm_adjustment;
+        
+        // In corners, enforce minimum PWM difference to ensure turning
+        if (in_corner) {
+            int actual_diff = pwmL - pwmR;
+            int abs_diff = (actual_diff < 0) ? -actual_diff : actual_diff;
+            
+            if (abs_diff < MIN_CORNER_PWM_DIFF) {
+                // Need more differential
+                int sign = (actual_diff > 0) ? 1 : -1;
+                int needed = (MIN_CORNER_PWM_DIFF - abs_diff) / 2;
+                pwmL += sign * needed;
+                pwmR -= sign * needed;
+            }
+        }
+        
+        // Clamp PWM values
+        pwmL = clamp_pwm_left(pwmL);
+        pwmR = clamp_pwm_right(pwmR);
+        
+        // Get current speeds
+        float vL = get_left_speed();
+        float vR = get_right_speed();
+        
+        // Drive motors
+        disable_pid_control();
+        forward_motor_manual(pwmL, pwmR);
+        
+        // Telemetry
+        if ((telem_counter++ % 10) == 0) {
+            const char *mode = in_corner ? "CORNER" : "STRAIGHT";
+            int pwm_diff = pwmL - pwmR;
+            printf("[EDGE] ADC=%u err=%+.0f %s pwmL=%d pwmR=%d diff=%d\n",
+                   adc_raw, (double)error, mode, pwmL, pwmR, pwm_diff);
 
             if (mqtt_is_connected()){
-                char json[256];
+                char json[320];
                 uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
                 int n = snprintf(json, sizeof(json),
-                    "{\"ts\":%u,\"adc\":%u,\"onTrack\":%s,"
-                    "\"vL\":%.2f,\"vR\":%.2f,\"state\":\"%s\","
-                    "\"trim\":%.3f,\"speed\":%.1f,\"followColor\":\"%s\"}",
-                    (unsigned)ts_ms,
-                    raw,
-                    on_track ? "true" : "false",
-                    (double)vL, (double)vR,
-                    state_str,
-                    (double)WHEEL_TRIM,
-                    (double)SLOW_SPEED_CMPS,
-                    FOLLOW_WHITE ? "WHITE" : "BLACK");
+                    "{\"ts\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
+                    "\"mode\":\"%s\",\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
+                    "\"vL\":%.2f,\"vR\":%.2f}",
+                    (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
+                    (double)error, mode, pwmL, pwmR, pwm_diff,
+                    (double)vL, (double)vR);
                 
                 if (n > 0 && n < (int)sizeof(json)) {
-                    err_t r = mqtt_publish_str(MQTT_TOPIC_TELEM, json);
-                    if (r != ERR_OK) {
-                        printf("[MQTT] publish err=%d\n", r);
-                    }
+                    mqtt_publish_str(MQTT_TOPIC_TELEM, json);
                 }
             }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(30));
+        
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -378,15 +402,28 @@ int main(void) {
 
     g_mqtt_mutex = xSemaphoreCreateMutex();
 
-    // Start network task (Wi-Fi + MQTT reconnect loop)
-    xTaskCreate(vNetworkTask, "net", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
+    printf("\n========================================\n");
+    printf("Edge Following - Aggressive Corners\n");
+    printf("========================================\n");
+    printf("Target edge: %d\n", TARGET_EDGE_VALUE);
+    printf("Corner threshold: %d (error above this)\n", CORNER_ERROR_THRESHOLD);
+    printf("Corner gain: %.1fx normal\n", (double)CORNER_GAIN_MULTIPLIER);
+    printf("Min corner PWM diff: %d\n", MIN_CORNER_PWM_DIFF);
+    
+    printf("\nCalibration readings:\n");
+    for (int i = 0; i < 10; i++) {
+        uint16_t adc_val = adc_read();
+        printf("  %d: %u\n", i+1, adc_val);
+        sleep_ms(200);
+    }
+    printf("========================================\n\n");
 
-    // Start line follow task
-    xTaskCreate(lineFollowTask, "LineFollow",
+    xTaskCreate(vNetworkTask, "net", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
+    xTaskCreate(edgeFollowTask, "EdgeFollow",
                 configMINIMAL_STACK_SIZE * 4,
                 NULL, tskIDLE_PRIORITY + 1, NULL);
 
-    printf("[MAIN] IR line-follow (ADC-only) with straightness trim ready.\n");
+    printf("[MAIN] Starting aggressive corner following...\n");
     vTaskStartScheduler();
     while (true) { tight_loop_contents(); }
     return 0;
