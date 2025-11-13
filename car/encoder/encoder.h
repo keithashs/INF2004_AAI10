@@ -1,24 +1,57 @@
-#pragma once
+#ifndef ENCODER_H
+#define ENCODER_H
+
+#include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
 
-// Initialize both wheel encoders and IRQ handlers
-void encoder_init(void);
+// Pins
+// #define L_ENCODER_POW 26
+#define L_ENCODER_OUT 6
+// #define R_ENCODER_POW 17
+#define R_ENCODER_OUT 16
 
-<<<<<<< Updated upstream
-// Reset total counts and the window sampler
-void encoder_reset_all(void);
-=======
 // Wheel/disc geometry
 #define PULSES_PER_REVOLUTION 20.0f
-#define WHEEL_CIRCUMFERENCE   6.5f   // cm
+#define WHEEL_CIRCUMFERENCE   20.0f   // cm
 #define WHEEL_TO_WHEEL_DISTANCE 10.8f // cm
->>>>>>> Stashed changes
 
-// Return the number of ticks counted for each wheel since the last call,
-// and advance the internal "window" for sampling (e.g., every 10 ms).
-void encoder_sample_window(uint16_t *win_m1, uint16_t *win_m2);
+#define INVALID_SPEED -1.0f
 
-// Read total tick counters (monotonic since last reset)
-uint32_t encoder_total_m1(void);
-uint32_t encoder_total_m2(void);
+typedef struct {
+    volatile uint32_t pulse_count;
+    volatile uint64_t timestamp_us;
+} EncoderData;
+
+typedef struct {
+    volatile EncoderData data;
+    volatile EncoderData last;
+    SemaphoreHandle_t    mutex;
+} Encoder;
+
+void  encoder_init(void);
+void  read_encoder_pulse(uint gpio, uint32_t events);
+
+// distances (cm)
+float get_left_distance(void);
+float get_right_distance(void);
+float get_average_distance(void);
+
+// speeds (cm/s)
+float get_left_speed(void);
+float get_right_speed(void);
+float get_average_speed(void);
+
+// reset
+void  reset_left_encoder(void);
+void  reset_right_encoder(void);
+void  reset_encoders(void);
+
+uint32_t get_left_encoder_count(void);
+uint32_t get_right_encoder_count(void);
+void     reset_encoder_counts(void); 
+
+#endif

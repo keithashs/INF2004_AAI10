@@ -1,44 +1,54 @@
-#pragma once
+#ifndef IMU_H
+#define IMU_H
+
 #include <stdbool.h>
 #include <stdint.h>
+#include "pico/stdlib.h"
+#include "hardware/i2c.h"
+
+// ===== Board wiring defaults (edit if needed) =====
+#define IMU_I2C_BAUD   400000   // you can set 400000 if your wiring is short/stable
+#define IMU_SDA_PIN    2
+#define IMU_SCL_PIN    3
+
+// ===== LSM303DLHC I2C addresses =====
+#define IMU_ACC_ADDR   0x19
+#define IMU_MAG_ADDR   0x1E
 
 typedef struct {
-    float ax, ay, az;     // g
-    float mx, my, mz;     // raw mag units
-    float roll_deg;
-    float pitch_deg;
-    float heading_deg;        // raw (tilt-compensated)
-    float heading_deg_filt;   // low-pass filtered
-    bool  ok;
-} imu_state_t;
+    // configuration
+    i2c_inst_t *i2c;     // i2c0 or i2c1
+    uint32_t    i2c_baud;
+    uint8_t     pin_sda;
+    uint8_t     pin_scl;
 
-bool imu_init(void);
-bool imu_read(imu_state_t* out);
-void imu_reset_heading_filter(float init_heading_deg);
+    // state
+    bool        inited_acc;
+    bool        inited_mag;
 
-// Mag calibration helpers
-void imu_cal_begin(void);
-void imu_cal_end(void);
+    // simple hard-iron offsets (counts)
+    float       mx_off, my_off, mz_off;
 
-// Heading Supervisor & Bias Calculation
+    // last computed heading (deg 0..360)
+    float       heading_deg;
+} imu_t;
 
-// Reset the heading supervisor state (call on START or after calibration)
-void imu_reset_heading_supervisor(void);
+bool  imu_init(imu_t *imu);
+bool  imu_read_accel_g(imu_t *imu, float *ax, float *ay, float *az);
+bool  imu_read_mag_raw(imu_t *imu, float *mx, float *my, float *mz);
+float imu_compute_heading_deg(imu_t *imu, float ax, float ay, float az,
+                              float mx, float my, float mz);
+float imu_update_and_get_heading(imu_t *imu);
 
-// Get IMU heading bias with supervisor gating
-// Returns weighted bias in CPS units, automatically handles:
-// - Heading error calculation
-// - Tilt and rate health checks
-// - Smooth weight ramping (0..1)
-// - PID calculation with deadband
-float imu_get_heading_bias(float target_heading_deg, float dt);
+// void  imu_calibrate_mag(imu_t *imu);
 
-// Get current supervisor health weight (0..1) for telemetry
-float imu_get_supervisor_weight(void);
+// helpers
+static inline void imu_set_mag_offsets(imu_t *imu, float mx_off, float my_off, float mz_off) {
+    if (!imu) return; 
+    imu->mx_off = mx_off; 
+    imu->my_off = my_off; 
+    imu->mz_off = mz_off;
+}
+static inline float imu_get_heading(imu_t *imu) { return imu ? imu->heading_deg : 0.f; }
 
-// --- Telemetry shared with motor loop ---
-extern volatile imu_state_t g_imu_last;
-extern volatile float       g_heading_err_deg;
-extern volatile float       g_bias_cps;
-extern volatile bool        g_imu_ok;
-extern volatile float       g_head_weight;
+#endif // IMU_H

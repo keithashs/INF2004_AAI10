@@ -117,3 +117,22 @@ Feel free to use, modify, and distribute for educational or research purposes.
 | Hing Zheng Wen | 2401599 | Motor Driver and PID Control |
 | Wong Liang Jin | 2400598 | Networking & Telemetry (MQTT) |
 | Lee Xu Xiang Keith | 2400845 | System Testing & Documentation |
+
+
+admin cmd
+tasklist | find "mosquitto"
+tasklist | findstr mosquitto
+taskkill /PID 25576 /F
+
+if nothing happen means mosquitto not running proceed with next task
+
+normal cmd
+cd "C:\Program Files\mosquitto"
+mosquitto.exe -v
+
+another normal cmd
+cd "C:\Program Files\mosquitto"
+mosquitto_sub -h localhost -p 1883 -t "pico/demo1/telemetry" -v
+
+window firewall defender 
+- turn window firewall defender off for private and public network
