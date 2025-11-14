@@ -50,11 +50,11 @@
 
 // PID gains for normal operation
 #ifndef KP_STEER
-#define KP_STEER 0.05f
+#define KP_STEER 0.02f
 #endif
 
 #ifndef KI_STEER
-#define KI_STEER 0.0005f
+#define KI_STEER 0.0006f
 #endif
 
 #ifndef KD_STEER
@@ -67,7 +67,7 @@
 #endif
 
 #ifndef ERROR_DEADBAND
-#define ERROR_DEADBAND 50
+#define ERROR_DEADBAND 30
 #endif
 
 // PWM scaling
@@ -324,10 +324,10 @@ static void edgeFollowTask(void *pvParameters) {
         // Adaptive base speed
         int base_pwm;
         if (in_corner) {
-            base_pwm = PWM_MIN_LEFT + 10 - CORNER_SPEED_REDUCTION;
+            base_pwm = PWM_MIN_LEFT - CORNER_SPEED_REDUCTION;
             if (base_pwm < PWM_MIN_LEFT) base_pwm = PWM_MIN_LEFT;
         } else {
-            base_pwm = PWM_MIN_LEFT + 10;
+            base_pwm = PWM_MIN_LEFT;
         }
         
         // Apply steering correction with higher scaling in corners

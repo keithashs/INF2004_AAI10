@@ -14,8 +14,8 @@
 // #define MOTOR_STBY 22  // optional if your driver has STBY
 
 // ---------------- PWM/Speed constants ----------------
-#define PWM_MIN_LEFT   120
-#define PWM_MIN_RIGHT  120
+#define PWM_MIN_LEFT   40
+#define PWM_MIN_RIGHT  40
 #define PWM_MID_LEFT   160
 #define PWM_MID_RIGHT  160
 #define PWM_MAX_LEFT   300
