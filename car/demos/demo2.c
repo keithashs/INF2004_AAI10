@@ -27,13 +27,19 @@
 
 // ======== CONFIG ========
 // --- Wi-Fi & MQTT ---
-#define WIFI_SSID                 "Keithiphone"
-#define WIFI_PASS                 "testong1"
+// #define WIFI_SSID                 "Keithiphone"
+// #define WIFI_PASS                 "testong1"
+#define WIFI_SSID                 "Jared"
+#define WIFI_PASS                 "1teddygodie"
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 
-#define BROKER_IP_STR             "172.20.10.2"
+// #define BROKER_IP_STR             "172.20.10.2"
+#define BROKER_IP_STR             "10.22.173.48"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/demo2/telemetry"
+#define MQTT_TOPIC_STATUS         "pico/demo2/status"
+#define MQTT_TOPIC_SENSOR         "pico/demo2/sensor"
+#define MQTT_TOPIC_MOTOR          "pico/demo2/motor"
 
 #ifndef LINE_SENSOR_PIN
 #define LINE_SENSOR_PIN 28           // GPIO28 -> ADC2
@@ -415,16 +421,44 @@ static void edgeFollowTask(void *pvParameters) {
             if (mqtt_is_connected()){
                 char json[384];
                 uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
-                int n = snprintf(json, sizeof(json),
-                    "{\"ts\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
+                int n;
+                
+                // Publish comprehensive telemetry
+                n = snprintf(json, sizeof(json),
+                    "{\"timestamp\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
                     "\"mode\":\"%s\",\"direction\":\"%s\",\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
-                    "\"vL\":%.2f,\"vR\":%.2f}",
+                    "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s}",
                     (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
                     (double)error, mode, direction, pwmL, pwmR, pwm_diff,
-                    (double)vL, (double)vR);
-                
+                    (double)vL, (double)vR, in_corner ? "true" : "false");
                 if (n > 0 && n < (int)sizeof(json)) {
                     mqtt_publish_str(MQTT_TOPIC_TELEM, json);
+                }
+                
+                // Publish separate sensor data for easier charting
+                n = snprintf(json, sizeof(json),
+                    "{\"adc\":%u,\"error\":%.1f,\"target\":%d}",
+                    adc_raw, (double)error, TARGET_EDGE_VALUE);
+                if (n > 0 && n < (int)sizeof(json)) {
+                    mqtt_publish_str(MQTT_TOPIC_SENSOR, json);
+                }
+                
+                // Publish motor data
+                n = snprintf(json, sizeof(json),
+                    "{\"pwmL\":%d,\"pwmR\":%d,\"speedL\":%.2f,\"speedR\":%.2f}",
+                    pwmL, pwmR, (double)vL, (double)vR);
+                if (n > 0 && n < (int)sizeof(json)) {
+                    mqtt_publish_str(MQTT_TOPIC_MOTOR, json);
+                }
+                
+                // Publish status every 50 cycles (less frequent)
+                if (telem_counter % 50 == 0) {
+                    n = snprintf(json, sizeof(json),
+                        "{\"mode\":\"%s\",\"direction\":\"%s\",\"corner\":%s}",
+                        mode, direction, in_corner ? "true" : "false");
+                    if (n > 0 && n < (int)sizeof(json)) {
+                        mqtt_publish_str(MQTT_TOPIC_STATUS, json);
+                    }
                 }
             }
         }
