@@ -27,13 +27,19 @@
 
 // ======== CONFIG ========
 // --- Wi-Fi & MQTT ---
-#define WIFI_SSID                 "Keithiphone"
-#define WIFI_PASS                 "testong1"
+// #define WIFI_SSID                 "Keithiphone"
+// #define WIFI_PASS                 "testong1"
+#define WIFI_SSID                 "Jared"
+#define WIFI_PASS                 "1teddygodie"
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 
-#define BROKER_IP_STR             "172.20.10.2"
+// #define BROKER_IP_STR             "172.20.10.2"
+#define BROKER_IP_STR             "10.22.173.48"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/demo2/telemetry"
+#define MQTT_TOPIC_STATUS         "pico/demo2/status"
+#define MQTT_TOPIC_SENSOR         "pico/demo2/sensor"
+#define MQTT_TOPIC_MOTOR          "pico/demo2/motor"
 
 #ifndef LINE_SENSOR_PIN
 #define LINE_SENSOR_PIN 28           // GPIO28 -> ADC2
@@ -41,7 +47,18 @@
 
 // ======== EDGE FOLLOWING PARAMETERS ========
 #ifndef TARGET_EDGE_VALUE
-#define TARGET_EDGE_VALUE 1800
+#define TARGET_EDGE_VALUE 1800  // ADC value: edge mode=boundary, center mode=middle of line
+#endif
+
+// Line following mode: 0=center-line (bidirectional), 1=edge (single direction)
+#ifndef LINE_FOLLOWING_MODE
+#define LINE_FOLLOWING_MODE 0  // Use center-line for figure-8 tracks
+#endif
+
+// Edge direction: +1=left edge (clockwise), -1=right edge (counterclockwise)
+// Only used if LINE_FOLLOWING_MODE=1
+#ifndef EDGE_DIRECTION
+#define EDGE_DIRECTION 1
 #endif
 
 #ifndef BASE_SPEED_CMPS
@@ -50,15 +67,15 @@
 
 // PID gains for normal operation
 #ifndef KP_STEER
-#define KP_STEER 0.02f
+#define KP_STEER 0.010f  // Reduced from 0.02 for smoother response
 #endif
 
 #ifndef KI_STEER
-#define KI_STEER 0.0006f
+#define KI_STEER 0.0002f  // Reduced from 0.0006 to minimize windup
 #endif
 
 #ifndef KD_STEER
-#define KD_STEER 0.012f
+#define KD_STEER 0.006f  // Reduced from 0.012 to dampen noise
 #endif
 
 // INCREASED maximum steering correction
@@ -77,21 +94,21 @@
 
 // Corner detection and handling
 #ifndef CORNER_ERROR_THRESHOLD
-#define CORNER_ERROR_THRESHOLD 250  // Lower threshold for earlier detection
+#define CORNER_ERROR_THRESHOLD 500  // Increased from 250 - only trigger on sharp turns
 #endif
 
 #ifndef CORNER_SPEED_REDUCTION
-#define CORNER_SPEED_REDUCTION 8  // Slow down MORE in corners
+#define CORNER_SPEED_REDUCTION 5  // Reduced from 8 - less speed change
 #endif
 
 // Exponential steering gain for corners
 #ifndef CORNER_GAIN_MULTIPLIER
-#define CORNER_GAIN_MULTIPLIER 1.8f  // Multiply steering by this in corners
+#define CORNER_GAIN_MULTIPLIER 1.3f  // Reduced from 1.8 - gentler corner boost
 #endif
 
 // Minimum PWM difference to ensure turning happens
 #ifndef MIN_CORNER_PWM_DIFF
-#define MIN_CORNER_PWM_DIFF 20  // Minimum difference between wheels in corners
+#define MIN_CORNER_PWM_DIFF 15  // Reduced from 20 - less forced differential
 #endif
 
 // ======== ADC init ========
@@ -145,6 +162,11 @@ static mqtt_client_t *g_mqtt = NULL;
 static ip_addr_t      g_broker_ip;
 static SemaphoreHandle_t g_mqtt_mutex;
 static volatile bool g_shutdown = false;
+
+// Edge-following state for bidirectional support
+static int8_t g_current_edge_direction = EDGE_DIRECTION;  // +1 left, -1 right
+static float  g_error_history_sum = 0.0f;  // Running sum for auto-detection
+static int    g_error_history_count = 0;
 
 static void mqtt_disconnect_now(void){
     if (!g_mqtt) return;
@@ -295,8 +317,38 @@ static void edgeFollowTask(void *pvParameters) {
         // Read ADC value
         uint16_t adc_raw = adc_read();
         
-        // Compute error
-        float error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
+        // Compute error based on following mode
+        float raw_error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
+        float error;
+        
+        if (LINE_FOLLOWING_MODE == 0) {
+            // CENTER-LINE MODE (bidirectional - recommended for figure-8)
+            // Positive error = sensor sees white (off line to the left) → turn right
+            // Negative error = sensor sees black (on line or right side) → turn left
+            // This works for both clockwise and counterclockwise
+            error = raw_error;
+        } else {
+            // EDGE MODE (single direction, requires correct EDGE_DIRECTION)
+            // Apply edge direction: +1 for left edge, -1 for right edge
+            error = g_current_edge_direction * raw_error;
+            
+            // Optional: Auto-detect if we're following the wrong edge
+            // If error is consistently large and same sign, we might be on wrong edge
+            g_error_history_sum += raw_error;
+            g_error_history_count++;
+            
+            if (g_error_history_count >= 50) {  // Every 1 second
+                float avg_error = g_error_history_sum / g_error_history_count;
+                // If average error magnitude is large, consider flipping edge
+                if (abs_float(avg_error) > 400.0f) {
+                    printf("[EDGE] Detected wrong edge direction, flipping...\n");
+                    g_current_edge_direction *= -1;
+                }
+                g_error_history_sum = 0.0f;
+                g_error_history_count = 0;
+            }
+        }
+        
         float abs_error = abs_float(error);
         
         // Detect corner
@@ -315,10 +367,7 @@ static void edgeFollowTask(void *pvParameters) {
             float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) * corner_intensity;
             steer_correction *= gain;
             
-            // Ensure we're turning enough
-            if (abs_float(steer_correction) < 0.5f) {
-                steer_correction = (error > 0) ? 0.5f : -0.5f;
-            }
+            // Removed forced minimum - let PID decide correction naturally
         }
         
         // Adaptive base speed
@@ -334,8 +383,11 @@ static void edgeFollowTask(void *pvParameters) {
         float effective_scale = in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
         int pwm_adjustment = (int)(steer_correction * effective_scale);
         
-        int pwmL = base_pwm - pwm_adjustment;
-        int pwmR = base_pwm + pwm_adjustment;
+        // CORRECTED STEERING LOGIC:
+        // positive error (white) = drifted left → speed up left, slow right → turn right back to edge
+        // negative error (black) = drifted right → slow left, speed up right → turn left back to edge
+        int pwmL = base_pwm + pwm_adjustment;
+        int pwmR = base_pwm - pwm_adjustment;
         
         // In corners, enforce minimum PWM difference to ensure turning
         if (in_corner) {
@@ -366,26 +418,65 @@ static void edgeFollowTask(void *pvParameters) {
         // Telemetry
         if ((telem_counter++ % 10) == 0) {
             const char *mode = in_corner ? "CORNER" : "STRAIGHT";
+            const char *follow_mode = (LINE_FOLLOWING_MODE == 0) ? "CENTER" : "EDGE";
+            const char *edge_dir = (g_current_edge_direction > 0) ? "LEFT" : "RIGHT";
+            
+            // Determine turn direction for telemetry
+            bool turning_left = (error > 0);
+            bool turning_right = (error < 0);
+            const char *direction = turning_left ? "LEFT" : (turning_right ? "RIGHT" : "STRAIGHT");
+            
             int pwm_diff = pwmL - pwmR;
-            printf("[EDGE] ADC=%u err=%+.0f %s pwmL=%d pwmR=%d diff=%d\n",
-                   adc_raw, (double)error, mode, pwmL, pwmR, pwm_diff);
+            printf("[%s-%s] ADC=%u err=%+.0f %s %s pwmL=%d pwmR=%d diff=%d\n",
+                   follow_mode, edge_dir, adc_raw, (double)error, mode, direction, pwmL, pwmR, pwm_diff);
 
             if (mqtt_is_connected()){
-                char json[320];
+                char json[384];
                 uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
-                int n = snprintf(json, sizeof(json),
-                    "{\"ts\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
-                    "\"mode\":\"%s\",\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
-                    "\"vL\":%.2f,\"vR\":%.2f}",
-                    (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
-                    (double)error, mode, pwmL, pwmR, pwm_diff,
-                    (double)vL, (double)vR);
+                int n;
                 
+                // Publish comprehensive telemetry
+                n = snprintf(json, sizeof(json),
+                    "{\"timestamp\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
+                    "\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\","
+                    "\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
+                    "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s}",
+                    (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
+                    (double)error, mode, direction, follow_mode, edge_dir,
+                    pwmL, pwmR, pwm_diff,
+                    (double)vL, (double)vR, in_corner ? "true" : "false");
                 if (n > 0 && n < (int)sizeof(json)) {
                     mqtt_publish_str(MQTT_TOPIC_TELEM, json);
                 }
+                
+                // Publish separate sensor data for easier charting
+                n = snprintf(json, sizeof(json),
+                    "{\"adc\":%u,\"error\":%.1f,\"target\":%d}",
+                    adc_raw, (double)error, TARGET_EDGE_VALUE);
+                if (n > 0 && n < (int)sizeof(json)) {
+                    mqtt_publish_str(MQTT_TOPIC_SENSOR, json);
+                }
+                
+                // Publish motor data
+                n = snprintf(json, sizeof(json),
+                    "{\"pwmL\":%d,\"pwmR\":%d,\"speedL\":%.2f,\"speedR\":%.2f}",
+                    pwmL, pwmR, (double)vL, (double)vR);
+                if (n > 0 && n < (int)sizeof(json)) {
+                    mqtt_publish_str(MQTT_TOPIC_MOTOR, json);
+                }
+                
+                // Publish status every 50 cycles (less frequent)
+                if (telem_counter % 50 == 0) {
+                    n = snprintf(json, sizeof(json),
+                        "{\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\",\"corner\":%s}",
+                        mode, direction, follow_mode, edge_dir, in_corner ? "true" : "false");
+                    if (n > 0 && n < (int)sizeof(json)) {
+                        mqtt_publish_str(MQTT_TOPIC_STATUS, json);
+                    }
+                }
             }
         }
+        
         
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -403,9 +494,13 @@ int main(void) {
     g_mqtt_mutex = xSemaphoreCreateMutex();
 
     printf("\n========================================\n");
-    printf("Edge Following - Aggressive Corners\n");
+    printf("Edge Following - Bidirectional Support\n");
     printf("========================================\n");
-    printf("Target edge: %d\n", TARGET_EDGE_VALUE);
+    printf("Mode: %s\n", (LINE_FOLLOWING_MODE == 0) ? "CENTER-LINE" : "EDGE");
+    if (LINE_FOLLOWING_MODE == 1) {
+        printf("Edge direction: %s\n", (EDGE_DIRECTION > 0) ? "LEFT (CW)" : "RIGHT (CCW)");
+    }
+    printf("Target ADC: %d\n", TARGET_EDGE_VALUE);
     printf("Corner threshold: %d (error above this)\n", CORNER_ERROR_THRESHOLD);
     printf("Corner gain: %.1fx normal\n", (double)CORNER_GAIN_MULTIPLIER);
     printf("Min corner PWM diff: %d\n", MIN_CORNER_PWM_DIFF);
@@ -423,7 +518,7 @@ int main(void) {
                 configMINIMAL_STACK_SIZE * 4,
                 NULL, tskIDLE_PRIORITY + 1, NULL);
 
-    printf("[MAIN] Starting aggressive corner following...\n");
+    printf("[MAIN] Starting bidirectional line following...\n");
     vTaskStartScheduler();
     while (true) { tight_loop_contents(); }
     return 0;
