@@ -47,7 +47,18 @@
 
 // ======== EDGE FOLLOWING PARAMETERS ========
 #ifndef TARGET_EDGE_VALUE
-#define TARGET_EDGE_VALUE 1800
+#define TARGET_EDGE_VALUE 1800  // ADC value: edge mode=boundary, center mode=middle of line
+#endif
+
+// Line following mode: 0=center-line (bidirectional), 1=edge (single direction)
+#ifndef LINE_FOLLOWING_MODE
+#define LINE_FOLLOWING_MODE 0  // Use center-line for figure-8 tracks
+#endif
+
+// Edge direction: +1=left edge (clockwise), -1=right edge (counterclockwise)
+// Only used if LINE_FOLLOWING_MODE=1
+#ifndef EDGE_DIRECTION
+#define EDGE_DIRECTION 1
 #endif
 
 #ifndef BASE_SPEED_CMPS
@@ -56,15 +67,15 @@
 
 // PID gains for normal operation
 #ifndef KP_STEER
-#define KP_STEER 0.015f
+#define KP_STEER 0.010f  // Reduced from 0.02 for smoother response
 #endif
 
 #ifndef KI_STEER
-#define KI_STEER 0.0005f
+#define KI_STEER 0.0002f  // Reduced from 0.0006 to minimize windup
 #endif
 
 #ifndef KD_STEER
-#define KD_STEER 0.010f
+#define KD_STEER 0.006f  // Reduced from 0.012 to dampen noise
 #endif
 
 // INCREASED maximum steering correction
@@ -83,41 +94,21 @@
 
 // Corner detection and handling
 #ifndef CORNER_ERROR_THRESHOLD
-#define CORNER_ERROR_THRESHOLD 600  // Lower threshold for earlier detection
+#define CORNER_ERROR_THRESHOLD 500  // Increased from 250 - only trigger on sharp turns
 #endif
 
 #ifndef CORNER_SPEED_REDUCTION
-#define CORNER_SPEED_REDUCTION 8  // Slow down MORE in corners
+#define CORNER_SPEED_REDUCTION 5  // Reduced from 8 - less speed change
 #endif
 
 // Exponential steering gain for corners
 #ifndef CORNER_GAIN_MULTIPLIER
-#define CORNER_GAIN_MULTIPLIER 1.8f  // Multiply steering by this in corners
+#define CORNER_GAIN_MULTIPLIER 1.3f  // Reduced from 1.8 - gentler corner boost
 #endif
 
 // Minimum PWM difference to ensure turning happens
 #ifndef MIN_CORNER_PWM_DIFF
-#define MIN_CORNER_PWM_DIFF 25  // Increased for sharper turns
-#endif
-
-// Motor asymmetry compensation - TUNE THESE VALUES!
-// If car turns right but not left, increase LEFT_TURN_BIAS
-// If car turns left but not right, increase RIGHT_TURN_BIAS
-#ifndef LEFT_TURN_BIAS
-#define LEFT_TURN_BIAS 1.5f  // Multiply left turn corrections by this
-#endif
-
-#ifndef RIGHT_TURN_BIAS
-#define RIGHT_TURN_BIAS 1.0f  // Multiply right turn corrections by this
-#endif
-
-// Additional compensation if one motor is consistently weaker
-#ifndef LEFT_MOTOR_BASE_BOOST
-#define LEFT_MOTOR_BASE_BOOST 8  // Add to left motor base PWM
-#endif
-
-#ifndef RIGHT_MOTOR_BASE_BOOST
-#define RIGHT_MOTOR_BASE_BOOST 0  // Add to right motor base PWM
+#define MIN_CORNER_PWM_DIFF 15  // Reduced from 20 - less forced differential
 #endif
 
 // ======== ADC init ========
@@ -171,6 +162,11 @@ static mqtt_client_t *g_mqtt = NULL;
 static ip_addr_t      g_broker_ip;
 static SemaphoreHandle_t g_mqtt_mutex;
 static volatile bool g_shutdown = false;
+
+// Edge-following state for bidirectional support
+static int8_t g_current_edge_direction = EDGE_DIRECTION;  // +1 left, -1 right
+static float  g_error_history_sum = 0.0f;  // Running sum for auto-detection
+static int    g_error_history_count = 0;
 
 static void mqtt_disconnect_now(void){
     if (!g_mqtt) return;
@@ -302,14 +298,10 @@ static void edgeFollowTask(void *pvParameters) {
     PIDController steer_pid;
     pid_init(&steer_pid, KP_STEER, KI_STEER, KD_STEER);
     
-    printf("[EDGE] Aggressive corner following with asymmetry compensation\n");
+    printf("[EDGE] Aggressive corner following initialized\n");
     printf("     Target: %d, Corner threshold: %d\n", 
            TARGET_EDGE_VALUE, CORNER_ERROR_THRESHOLD);
     printf("     Corner gain multiplier: %.1fx\n", (double)CORNER_GAIN_MULTIPLIER);
-    printf("     Left turn bias: %.2fx, Right turn bias: %.2fx\n", 
-           (double)LEFT_TURN_BIAS, (double)RIGHT_TURN_BIAS);
-    printf("     Motor boost - L: +%d, R: +%d\n", 
-           LEFT_MOTOR_BASE_BOOST, RIGHT_MOTOR_BASE_BOOST);
     
     uint64_t last_time = time_us_64();
     int telem_counter = 0;
@@ -325,8 +317,38 @@ static void edgeFollowTask(void *pvParameters) {
         // Read ADC value
         uint16_t adc_raw = adc_read();
         
-        // Compute error
-        float error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
+        // Compute error based on following mode
+        float raw_error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
+        float error;
+        
+        if (LINE_FOLLOWING_MODE == 0) {
+            // CENTER-LINE MODE (bidirectional - recommended for figure-8)
+            // Positive error = sensor sees white (off line to the left) → turn right
+            // Negative error = sensor sees black (on line or right side) → turn left
+            // This works for both clockwise and counterclockwise
+            error = raw_error;
+        } else {
+            // EDGE MODE (single direction, requires correct EDGE_DIRECTION)
+            // Apply edge direction: +1 for left edge, -1 for right edge
+            error = g_current_edge_direction * raw_error;
+            
+            // Optional: Auto-detect if we're following the wrong edge
+            // If error is consistently large and same sign, we might be on wrong edge
+            g_error_history_sum += raw_error;
+            g_error_history_count++;
+            
+            if (g_error_history_count >= 50) {  // Every 1 second
+                float avg_error = g_error_history_sum / g_error_history_count;
+                // If average error magnitude is large, consider flipping edge
+                if (abs_float(avg_error) > 400.0f) {
+                    printf("[EDGE] Detected wrong edge direction, flipping...\n");
+                    g_current_edge_direction *= -1;
+                }
+                g_error_history_sum = 0.0f;
+                g_error_history_count = 0;
+            }
+        }
+        
         float abs_error = abs_float(error);
         
         // Detect corner
@@ -334,17 +356,6 @@ static void edgeFollowTask(void *pvParameters) {
         
         // Compute base steering correction from PID
         float steer_correction = pid_compute(&steer_pid, error, dt);
-        
-        // Determine turn direction (positive error = need to turn left, negative = turn right)
-        bool turning_left = (error > 0);
-        bool turning_right = (error < 0);
-        
-        // Apply directional bias compensation
-        if (turning_left && abs_float(steer_correction) > 0.1f) {
-            steer_correction *= LEFT_TURN_BIAS;
-        } else if (turning_right && abs_float(steer_correction) > 0.1f) {
-            steer_correction *= RIGHT_TURN_BIAS;
-        }
         
         // Apply exponential gain for corners
         if (in_corner) {
@@ -356,10 +367,7 @@ static void edgeFollowTask(void *pvParameters) {
             float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) * corner_intensity;
             steer_correction *= gain;
             
-            // Ensure we're turning enough in corners
-            if (abs_float(steer_correction) < 0.6f) {
-                steer_correction = (error > 0) ? 0.6f : -0.6f;
-            }
+            // Removed forced minimum - let PID decide correction naturally
         }
         
         // Adaptive base speed
@@ -375,8 +383,11 @@ static void edgeFollowTask(void *pvParameters) {
         float effective_scale = in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
         int pwm_adjustment = (int)(steer_correction * effective_scale);
         
-        int pwmL = base_pwm - pwm_adjustment + LEFT_MOTOR_BASE_BOOST;
-        int pwmR = base_pwm + pwm_adjustment + RIGHT_MOTOR_BASE_BOOST;
+        // CORRECTED STEERING LOGIC:
+        // positive error (white) = drifted left → speed up left, slow right → turn right back to edge
+        // negative error (black) = drifted right → slow left, speed up right → turn left back to edge
+        int pwmL = base_pwm + pwm_adjustment;
+        int pwmR = base_pwm - pwm_adjustment;
         
         // In corners, enforce minimum PWM difference to ensure turning
         if (in_corner) {
@@ -387,12 +398,6 @@ static void edgeFollowTask(void *pvParameters) {
                 // Need more differential
                 int sign = (actual_diff > 0) ? 1 : -1;
                 int needed = (MIN_CORNER_PWM_DIFF - abs_diff) / 2;
-                
-                // Apply asymmetric boost for left turns if needed
-                if (turning_left) {
-                    needed = (int)(needed * 1.2f);  // 20% more for left turns
-                }
-                
                 pwmL += sign * needed;
                 pwmR -= sign * needed;
             }
@@ -413,10 +418,17 @@ static void edgeFollowTask(void *pvParameters) {
         // Telemetry
         if ((telem_counter++ % 10) == 0) {
             const char *mode = in_corner ? "CORNER" : "STRAIGHT";
+            const char *follow_mode = (LINE_FOLLOWING_MODE == 0) ? "CENTER" : "EDGE";
+            const char *edge_dir = (g_current_edge_direction > 0) ? "LEFT" : "RIGHT";
+            
+            // Determine turn direction for telemetry
+            bool turning_left = (error > 0);
+            bool turning_right = (error < 0);
             const char *direction = turning_left ? "LEFT" : (turning_right ? "RIGHT" : "STRAIGHT");
+            
             int pwm_diff = pwmL - pwmR;
-            printf("[EDGE] ADC=%u err=%+.0f %s %s pwmL=%d pwmR=%d diff=%d\n",
-                   adc_raw, (double)error, mode, direction, pwmL, pwmR, pwm_diff);
+            printf("[%s-%s] ADC=%u err=%+.0f %s %s pwmL=%d pwmR=%d diff=%d\n",
+                   follow_mode, edge_dir, adc_raw, (double)error, mode, direction, pwmL, pwmR, pwm_diff);
 
             if (mqtt_is_connected()){
                 char json[384];
@@ -426,10 +438,12 @@ static void edgeFollowTask(void *pvParameters) {
                 // Publish comprehensive telemetry
                 n = snprintf(json, sizeof(json),
                     "{\"timestamp\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
-                    "\"mode\":\"%s\",\"direction\":\"%s\",\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
+                    "\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\","
+                    "\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
                     "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s}",
                     (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
-                    (double)error, mode, direction, pwmL, pwmR, pwm_diff,
+                    (double)error, mode, direction, follow_mode, edge_dir,
+                    pwmL, pwmR, pwm_diff,
                     (double)vL, (double)vR, in_corner ? "true" : "false");
                 if (n > 0 && n < (int)sizeof(json)) {
                     mqtt_publish_str(MQTT_TOPIC_TELEM, json);
@@ -454,14 +468,15 @@ static void edgeFollowTask(void *pvParameters) {
                 // Publish status every 50 cycles (less frequent)
                 if (telem_counter % 50 == 0) {
                     n = snprintf(json, sizeof(json),
-                        "{\"mode\":\"%s\",\"direction\":\"%s\",\"corner\":%s}",
-                        mode, direction, in_corner ? "true" : "false");
+                        "{\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\",\"corner\":%s}",
+                        mode, direction, follow_mode, edge_dir, in_corner ? "true" : "false");
                     if (n > 0 && n < (int)sizeof(json)) {
                         mqtt_publish_str(MQTT_TOPIC_STATUS, json);
                     }
                 }
             }
         }
+        
         
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -479,17 +494,16 @@ int main(void) {
     g_mqtt_mutex = xSemaphoreCreateMutex();
 
     printf("\n========================================\n");
-    printf("Edge Following - Asymmetry Compensated\n");
+    printf("Edge Following - Bidirectional Support\n");
     printf("========================================\n");
-    printf("Target edge: %d\n", TARGET_EDGE_VALUE);
+    printf("Mode: %s\n", (LINE_FOLLOWING_MODE == 0) ? "CENTER-LINE" : "EDGE");
+    if (LINE_FOLLOWING_MODE == 1) {
+        printf("Edge direction: %s\n", (EDGE_DIRECTION > 0) ? "LEFT (CW)" : "RIGHT (CCW)");
+    }
+    printf("Target ADC: %d\n", TARGET_EDGE_VALUE);
     printf("Corner threshold: %d (error above this)\n", CORNER_ERROR_THRESHOLD);
     printf("Corner gain: %.1fx normal\n", (double)CORNER_GAIN_MULTIPLIER);
     printf("Min corner PWM diff: %d\n", MIN_CORNER_PWM_DIFF);
-    printf("\nMotor Compensation:\n");
-    printf("  Left turn bias: %.2fx\n", (double)LEFT_TURN_BIAS);
-    printf("  Right turn bias: %.2fx\n", (double)RIGHT_TURN_BIAS);
-    printf("  Left motor boost: +%d PWM\n", LEFT_MOTOR_BASE_BOOST);
-    printf("  Right motor boost: +%d PWM\n", RIGHT_MOTOR_BASE_BOOST);
     
     printf("\nCalibration readings:\n");
     for (int i = 0; i < 10; i++) {
@@ -504,7 +518,7 @@ int main(void) {
                 configMINIMAL_STACK_SIZE * 4,
                 NULL, tskIDLE_PRIORITY + 1, NULL);
 
-    printf("[MAIN] Starting aggressive corner following...\n");
+    printf("[MAIN] Starting bidirectional line following...\n");
     vTaskStartScheduler();
     while (true) { tight_loop_contents(); }
     return 0;
