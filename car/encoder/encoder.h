@@ -16,7 +16,7 @@
 
 // Wheel/disc geometry
 #define PULSES_PER_REVOLUTION 20.0f
-#define WHEEL_CIRCUMFERENCE   20.0f   // cm
+#define WHEEL_CIRCUMFERENCE   6.5f   // cm
 #define WHEEL_TO_WHEEL_DISTANCE 10.8f // cm
 
 #define INVALID_SPEED -1.0f
