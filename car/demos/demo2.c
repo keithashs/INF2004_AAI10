@@ -34,7 +34,7 @@
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 
 // #define BROKER_IP_STR             "172.20.10.2"
-#define BROKER_IP_STR             "10.22.173.48"
+#define BROKER_IP_STR             "10.22.173.149"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/demo2/telemetry"
 #define MQTT_TOPIC_STATUS         "pico/demo2/status"
@@ -67,7 +67,7 @@
 
 // PID gains for normal operation
 #ifndef KP_STEER
-#define KP_STEER 0.010f  // Reduced from 0.02 for smoother response
+#define KP_STEER 0.055f  // Reduced from 0.02 for smoother response
 #endif
 
 #ifndef KI_STEER
@@ -75,7 +75,7 @@
 #endif
 
 #ifndef KD_STEER
-#define KD_STEER 0.006f  // Reduced from 0.012 to dampen noise
+#define KD_STEER 0.0010f  // Reduced from 0.012 to dampen noise
 #endif
 
 // INCREASED maximum steering correction
@@ -94,21 +94,21 @@
 
 // Corner detection and handling
 #ifndef CORNER_ERROR_THRESHOLD
-#define CORNER_ERROR_THRESHOLD 500  // Increased from 250 - only trigger on sharp turns
+#define CORNER_ERROR_THRESHOLD 300  // Increased from 250 - only trigger on sharp turns
 #endif
 
 #ifndef CORNER_SPEED_REDUCTION
-#define CORNER_SPEED_REDUCTION 5  // Reduced from 8 - less speed change
+#define CORNER_SPEED_REDUCTION 8  // Reduced from 8 - less speed change
 #endif
 
 // Exponential steering gain for corners
 #ifndef CORNER_GAIN_MULTIPLIER
-#define CORNER_GAIN_MULTIPLIER 1.3f  // Reduced from 1.8 - gentler corner boost
+#define CORNER_GAIN_MULTIPLIER 1.6f  // Reduced from 1.8 - gentler corner boost
 #endif
 
 // Minimum PWM difference to ensure turning happens
 #ifndef MIN_CORNER_PWM_DIFF
-#define MIN_CORNER_PWM_DIFF 15  // Reduced from 20 - less forced differential
+#define MIN_CORNER_PWM_DIFF 40  // Reduced from 20 - less forced differential
 #endif
 
 // ======== ADC init ========
