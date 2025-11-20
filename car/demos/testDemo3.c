@@ -43,6 +43,14 @@
 #define MQTT_TOPIC_MOTOR          "pico/demo3/motor"
 #define MQTT_TOPIC_OBSTACLE       "pico/demo3/obstacle"
 
+  // Increased from 2000ms
+   // NEW: Extra settling after servo moves
+#define INITIAL_STOP_DELAY_MS       1000
+
+#define MAX_DISTANCE_DIFF_FACTOR    2.5f 
+#define MIN_DISTANCE_FOR_WIDTH_SCAN 17.5f   // Only scan if < 15cm away
+#define MAX_REASONABLE_WIDTH_CM     30.0f   // Reject widths > 30cm as errors
+#define MAX_EDGE_DISTANCE_CM        40.0f   // Edge reading can't be > 40cm
 #ifndef LINE_SENSOR_PIN
 #define LINE_SENSOR_PIN 28           // GPIO28 -> ADC2
 #endif
@@ -85,6 +93,8 @@
 #define MAX_STEER_CORRECTION 2.0f  // INCREASED to allow aggressive corner turns
 #endif
 
+
+
 #ifndef ERROR_DEADBAND
 #define ERROR_DEADBAND 30
 #endif
@@ -117,13 +127,14 @@
 #define OBSTACLE_THRESHOLD_CM       25.0f
 #define SERVO_CENTER_ANGLE          90.0f
 #define SERVO_RIGHT_ANGLE           150.0f
-#define SERVO_LEFT_ANGLE            35.0f
+#define SERVO_LEFT_ANGLE            30.0f
+#define MEASUREMENT_DELAY_MS        200    // Increased from 50ms
+#define REFINEMENT_DELAY_MS         3000 
 #define SERVO_SCAN_STEP_DEGREE      1.0f
 #define SERVO_REFINE_STEP_DEGREE    0.5f
-#define MEASUREMENT_DELAY_MS        50
-#define REFINEMENT_DELAY_MS         2000
+#define SERVO_SETTLE_DELAY_MS       300
 #define MAX_DETECTION_DISTANCE_CM   100.0f
-#define EDGE_CONFIRMATION_SAMPLES   5
+#define EDGE_CONFIRMATION_SAMPLES   15
 #define CONSISTENCY_THRESHOLD_CM    10.0f
 
 // NEW: Obstacle check frequency (check every N loop iterations)
@@ -366,14 +377,28 @@ static bool take_consistent_samples(float *avg_distance_out) {
     *avg_distance_out = sum / valid;
     return (var <= CONSISTENCY_THRESHOLD_CM);
 }
-
+static bool validate_edge_distance(float center_distance, float edge_distance, const char* side) {
+    // Edge distance should not be too far from center distance
+    float max_expected = center_distance * MAX_DISTANCE_DIFF_FACTOR;
+    
+    if (edge_distance > MAX_EDGE_DISTANCE_CM) {
+        printf(" [VALIDATE-%s] REJECTED: %.2f cm > max allowed (%.2f cm)\n", 
+               side, edge_distance, MAX_EDGE_DISTANCE_CM);
+        return false;
+    }
+    
+    if (edge_distance > max_expected) {
+        printf(" [VALIDATE-%s] REJECTED: %.2f cm > expected max (%.2f cm based on center %.2f cm)\n",
+               side, edge_distance, max_expected, center_distance);
+        return false;
+    }
+    
+    printf(" [VALIDATE-%s] PASSED: %.2f cm is reasonable\n", side, edge_distance);
+    return true;
+}
 static float scan_left_side(float adjacent) {
-    printf("\n[LEFT_SCAN] Waiting 2 seconds before scanning...\n");
+    printf("\n[LEFT_SCAN] Starting from 35° scanning toward 90°...\n");
     sleep_ms(2000);
-    printf("[LEFT_SCAN] Starting from 35° scanning toward 90°...\n");
-    printf("[LEFT_SCAN] Looking for ECHO (edge detection)...\n");
-    printf("[LEFT_SCAN] Angle │ Status\n");
-    printf("[LEFT_SCAN] ──────┼────────────────\n");
 
     float current_angle = SERVO_LEFT_ANGLE;
     bool edge_found = false;
@@ -381,17 +406,22 @@ static float scan_left_side(float adjacent) {
 
     while (current_angle <= SERVO_CENTER_ANGLE && !edge_found) {
         servo_set_angle(current_angle);
-        sleep_ms(MEASUREMENT_DELAY_MS);
+        sleep_ms(SERVO_SETTLE_DELAY_MS);
+        
         float d = ultrasonic_get_distance_cm();
         if (d > 0 && d <= MAX_DETECTION_DISTANCE_CM) {
-            printf("[LEFT_SCAN] %.1f° │ ✓ ECHO! Confirming...\n", current_angle);
+            printf("[LEFT_SCAN] %.1f° │ ECHO at %.2f cm, confirming...\n", current_angle, d);
             float avg;
             if (take_consistent_samples(&avg)) {
-                printf("[LEFT_SCAN] ✓✓ EDGE FOUND at %.1f°! Starting refinement...\n",
-                       current_angle);
-                edge_found = true;
-                edge_distance = avg;
-                break;
+                // NEW: Validate the edge distance
+                if (validate_edge_distance(adjacent, avg, "LEFT")) {
+                    printf("[LEFT_SCAN] ✓✓ VALID EDGE at %.1f°!\n", current_angle);
+                    edge_found = true;
+                    edge_distance = avg;
+                    break;
+                } else {
+                    printf("[LEFT_SCAN] ✗ Invalid edge distance, continuing...\n");
+                }
             } else {
                 printf("[LEFT_SCAN] ✗ Inconsistent, continuing...\n");
             }
@@ -402,44 +432,29 @@ static float scan_left_side(float adjacent) {
     }
 
     if (!edge_found) {
-        printf("[LEFT_SCAN] No edge found!\n");
+        printf("[LEFT_SCAN] No valid edge found!\n");
         return 0.0f;
     }
 
-    printf("\n[LEFT_REFINE] Starting edge refinement (moving back toward 35°)...\n");
-    while (current_angle >= SERVO_LEFT_ANGLE) {
-        current_angle -= SERVO_REFINE_STEP_DEGREE;
-        servo_set_angle(current_angle);
-        printf("[LEFT_REFINE] Testing %.1f° (waiting 2s)...\n", current_angle);
-        sleep_ms(REFINEMENT_DELAY_MS);
-
-        float avg;
-        if (take_consistent_samples(&avg)) {
-            printf("[LEFT_REFINE] ✓ Still edge at %.1f°, avg: %.2f cm\n",
-                   current_angle, avg);
-            edge_distance = avg;
-        } else {
-            printf("[LEFT_REFINE] ✗ Edge lost! Final edge at %.1f°\n",
-                   current_angle + SERVO_REFINE_STEP_DEGREE);
-            current_angle += SERVO_REFINE_STEP_DEGREE;
-            break;
-        }
-    }
-
+    printf("\n[LEFT_REFINE] Refinement skipped - using initial edge\n");
+    
     float left_width = calculate_width_component(adjacent, edge_distance);
-    printf("[LEFT_REFINE] Final edge angle: %.1f°\n", current_angle);
-    printf("[LEFT_REFINE] Final distance: %.2f cm\n", edge_distance);
-    printf("[LEFT_REFINE] LEFT width: %.2f cm\n", left_width);
+    
+    // NEW: Final width validation
+    if (left_width > MAX_REASONABLE_WIDTH_CM) {
+        printf("[LEFT_SCAN] ✗ REJECTED: Width %.2f cm > max reasonable (%.2f cm)\n",
+               left_width, MAX_REASONABLE_WIDTH_CM);
+        return 0.0f;
+    }
+    
+    printf("[LEFT_SCAN] Final distance: %.2f cm\n", edge_distance);
+    printf("[LEFT_SCAN] LEFT width: %.2f cm ✓\n", left_width);
     return left_width;
 }
 
 static float scan_right_side(float adjacent) {
-    printf("\n[RIGHT_SCAN] Waiting 2 seconds before scanning...\n");
+    printf("\n[RIGHT_SCAN] Starting from 150° scanning toward 90°...\n");
     sleep_ms(2000);
-    printf("[RIGHT_SCAN] Starting from 150° scanning toward 90°...\n");
-    printf("[RIGHT_SCAN] Looking for ECHO (edge detection)...\n");
-    printf("[RIGHT_SCAN] Angle │ Status\n");
-    printf("[RIGHT_SCAN] ──────┼────────────────\n");
 
     float current_angle = SERVO_RIGHT_ANGLE;
     bool edge_found = false;
@@ -447,17 +462,22 @@ static float scan_right_side(float adjacent) {
 
     while (current_angle >= SERVO_CENTER_ANGLE && !edge_found) {
         servo_set_angle(current_angle);
-        sleep_ms(MEASUREMENT_DELAY_MS);
+        sleep_ms(SERVO_SETTLE_DELAY_MS);
+        
         float d = ultrasonic_get_distance_cm();
         if (d > 0 && d <= MAX_DETECTION_DISTANCE_CM) {
-            printf("[RIGHT_SCAN] %.1f° │ ✓ ECHO! Confirming...\n", current_angle);
+            printf("[RIGHT_SCAN] %.1f° │ ECHO at %.2f cm, confirming...\n", current_angle, d);
             float avg;
             if (take_consistent_samples(&avg)) {
-                printf("[RIGHT_SCAN] ✓✓ EDGE FOUND at %.1f°! Starting refinement...\n",
-                       current_angle);
-                edge_found = true;
-                edge_distance = avg;
-                break;
+                // NEW: Validate the edge distance
+                if (validate_edge_distance(adjacent, avg, "RIGHT")) {
+                    printf("[RIGHT_SCAN] ✓✓ VALID EDGE at %.1f°!\n", current_angle);
+                    edge_found = true;
+                    edge_distance = avg;
+                    break;
+                } else {
+                    printf("[RIGHT_SCAN] ✗ Invalid edge distance, continuing...\n");
+                }
             } else {
                 printf("[RIGHT_SCAN] ✗ Inconsistent, continuing...\n");
             }
@@ -468,46 +488,61 @@ static float scan_right_side(float adjacent) {
     }
 
     if (!edge_found) {
-        printf("[RIGHT_SCAN] No edge found!\n");
+        printf("[RIGHT_SCAN] No valid edge found!\n");
         return 0.0f;
     }
 
-    printf("\n[RIGHT_REFINE] Starting edge refinement (moving back toward 150°)...\n");
-    while (current_angle <= SERVO_RIGHT_ANGLE) {
-        current_angle += SERVO_REFINE_STEP_DEGREE;
-        servo_set_angle(current_angle);
-        printf("[RIGHT_REFINE] Testing %.1f° (waiting 2s)...\n", current_angle);
-        sleep_ms(REFINEMENT_DELAY_MS);
-
-        float avg;
-        if (take_consistent_samples(&avg)) {
-            printf("[RIGHT_REFINE] ✓ Still edge at %.1f°, avg: %.2f cm\n",
-                   current_angle, avg);
-            edge_distance = avg;
-        } else {
-            printf("[RIGHT_REFINE] ✗ Edge lost! Final edge at %.1f°\n",
-                   current_angle - SERVO_REFINE_STEP_DEGREE);
-            current_angle -= SERVO_REFINE_STEP_DEGREE;
-            break;
-        }
-    }
-
+    printf("\n[RIGHT_REFINE] Refinement skipped - using initial edge\n");
+    
     float right_width = calculate_width_component(adjacent, edge_distance);
-    printf("[RIGHT_REFINE] Final edge angle: %.1f°\n", current_angle);
-    printf("[RIGHT_REFINE] Final distance: %.2f cm\n", edge_distance);
-    printf("[RIGHT_REFINE] RIGHT width: %.2f cm\n", right_width);
+    
+    // NEW: Final width validation
+    if (right_width > MAX_REASONABLE_WIDTH_CM) {
+        printf("[RIGHT_SCAN] ✗ REJECTED: Width %.2f cm > max reasonable (%.2f cm)\n",
+               right_width, MAX_REASONABLE_WIDTH_CM);
+        return 0.0f;
+    }
+    
+    printf("[RIGHT_SCAN] Final distance: %.2f cm\n", edge_distance);
+    printf("[RIGHT_SCAN] RIGHT width: %.2f cm ✓\n", right_width);
     return right_width;
 }
+
 
 static void run_width_scan_sequence(float adjacent) {
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════════╗\n");
     printf("║ *** OBSTACLE DETECTED ***                                         ║\n");
-    printf("║ Perpendicular Distance: %.2f cm (adjacent)                        ║\n", adjacent);
+    printf("║ Perpendicular Distance: %.2f cm                                   ║\n", adjacent);
     printf("╚════════════════════════════════════════════════════════════════════╝\n");
 
+    // NEW: Only do width scan if obstacle is close enough to trust readings
+    if (adjacent > MIN_DISTANCE_FOR_WIDTH_SCAN) {
+        printf("\n[SCAN] Distance %.2f cm > %.2f cm - TOO FAR for reliable width measurement\n",
+               adjacent, MIN_DISTANCE_FOR_WIDTH_SCAN);
+        printf("[SCAN] Skipping width scan - ultrasonic not reliable at this distance\n");
+        
+        if (mqtt_is_connected()) {
+            char json[200];
+            uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
+            int n = snprintf(json, sizeof(json),
+                             "{\"ts\":%u,\"adjacent\":%.2f,\"leftWidth\":0.00,"
+                             "\"rightWidth\":0.00,\"totalWidth\":0.00,\"note\":\"too_far\"}",
+                             (unsigned)ts_ms, (double)adjacent);
+            if (n > 0 && n < (int)sizeof(json)) {
+                mqtt_publish_str(MQTT_TOPIC_OBSTACLE, json);
+            }
+        }
+        
+        servo_set_angle(SERVO_CENTER_ANGLE);
+        return;
+    }
+
+    printf("[SCAN] Distance %.2f cm < %.2f cm - GOOD for width measurement\n",
+           adjacent, MIN_DISTANCE_FOR_WIDTH_SCAN);
+    printf("Waiting %dms for system to stabilize...\n", INITIAL_STOP_DELAY_MS);
     servo_set_angle(SERVO_CENTER_ANGLE);
-    sleep_ms(500);
+    sleep_ms(INITIAL_STOP_DELAY_MS);
 
     float left_w  = scan_left_side(adjacent);
     sleep_ms(500);
@@ -531,13 +566,9 @@ static void run_width_scan_sequence(float adjacent) {
         if (n > 0 && n < (int)sizeof(json)) {
             err_t r = mqtt_publish_str(MQTT_TOPIC_OBSTACLE, json);
             if (r == ERR_OK) {
-                printf("[MQTT] Published obstacle data: %s\n", json);
-            } else {
-                printf("[MQTT] Publish failed, err=%d\n", r);
+                printf("[MQTT] Published obstacle data\n");
             }
         }
-    } else {
-        printf("[MQTT] Not connected, skipping obstacle telemetry publish\n");
     }
 
     servo_set_angle(SERVO_CENTER_ANGLE);
