@@ -4,7 +4,6 @@
 // - Sensor: ADC on GPIO28 (ADC2)
 // - Exponential steering gain for sharp corners
 // - Maintains smooth control on straights
-// - MODIFICATION: Waits for MQTT connection and first telemetry publish before motor movement
 // ==============================
 
 #include <stdio.h>
@@ -28,14 +27,14 @@
 
 // ======== CONFIG ========
 // --- Wi-Fi & MQTT ---
-#define WIFI_SSID                 "Keithiphone"
-#define WIFI_PASS                 "testong1"
-// #define WIFI_SSID                 "Jared"
-// #define WIFI_PASS                 "1teddygodie"
+// #define WIFI_SSID                 "Keithiphone"
+// #define WIFI_PASS                 "testong1"
+#define WIFI_SSID                 "Jared"
+#define WIFI_PASS                 "1teddygodie"
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 
-#define BROKER_IP_STR             "172.20.10.3"
-// #define BROKER_IP_STR             "10.22.173.149"
+// #define BROKER_IP_STR             "172.20.10.2"
+#define BROKER_IP_STR             "10.22.173.149"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/demo2/telemetry"
 #define MQTT_TOPIC_STATUS         "pico/demo2/status"
@@ -119,25 +118,6 @@ static inline void init_line_adc(void) {
     adc_select_input(2);
 }
 
-// These limit PWM values to safe operating ranges
-#ifndef PWM_CLAMP_DEFINED
-static inline int clamp_pwm_left(int pwm) {
-    // Clamp to valid PWM range for left motor
-    // Adjust these values based on your motor.h definitions
-    if (pwm < PWM_MIN_LEFT) return PWM_MIN_LEFT;
-    if (pwm > PWM_MAX_LEFT) return PWM_MAX_LEFT;
-    return pwm;
-}
-
-static inline int clamp_pwm_right(int pwm) {
-    // Clamp to valid PWM range for right motor
-    // Adjust these values based on your motor.h definitions
-    if (pwm < PWM_MIN_RIGHT) return PWM_MIN_RIGHT;
-    if (pwm > PWM_MAX_RIGHT) return PWM_MAX_RIGHT;
-    return pwm;
-}
-#endif
-
 // ======== PID Controller ========
 typedef struct {
     float integral;
@@ -182,9 +162,6 @@ static mqtt_client_t *g_mqtt = NULL;
 static ip_addr_t      g_broker_ip;
 static SemaphoreHandle_t g_mqtt_mutex;
 static volatile bool g_shutdown = false;
-
-// **NEW**: Flag to track first telemetry publish
-static volatile bool g_first_telemetry_published = false;
 
 // Edge-following state for bidirectional support
 static int8_t g_current_edge_direction = EDGE_DIRECTION;  // +1 left, -1 right
@@ -241,151 +218,94 @@ static bool mqtt_connect_blocking(void){
     err_t er = mqtt_client_connect(g_mqtt, &g_broker_ip, BROKER_PORT, 
                                    mqtt_conn_cb, NULL, &ci);
     if (er != ERR_OK){ 
-        printf("[MQTT] connect request failed: %d\n", er); 
+        printf("[MQTT] connect err=%d\n", er); 
         return false; 
     }
-    printf("[MQTT] Connect request sent...\n");
-    
-    // Wait for connection
-    for (int i = 0; i < 50; i++){
-        if (mqtt_client_is_connected(g_mqtt)) {
-            printf("[MQTT] Connection established!\n");
-            return true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    printf("[MQTT] Connect timed out\n");
-    return false;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    return mqtt_client_is_connected(g_mqtt);
 }
 
-static bool mqtt_is_connected(void){
-    return (g_mqtt && mqtt_client_is_connected(g_mqtt));
+static bool mqtt_is_connected(void){ 
+    return g_mqtt && mqtt_client_is_connected(g_mqtt); 
 }
 
-static void mqtt_publish_str(const char *topic, const char *data){
-    if (!mqtt_is_connected()) return;
-    if (xSemaphoreTake(g_mqtt_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-
+static err_t mqtt_publish_str(const char *topic, const char *payload){
+    if (!mqtt_is_connected()) return ERR_CONN;
+    if (g_mqtt_mutex) xSemaphoreTake(g_mqtt_mutex, portMAX_DELAY);
     cyw43_arch_lwip_begin();
-    mqtt_publish(g_mqtt, topic, data, strlen(data), 0, 0, mqtt_pub_cb, NULL);
+    err_t r = mqtt_publish(g_mqtt, topic, (const u8_t*)payload, 
+                          (u16_t)strlen(payload),
+                          0 /*qos0*/, 0 /*retain*/, mqtt_pub_cb, NULL);
     cyw43_arch_lwip_end();
-
-    xSemaphoreGive(g_mqtt_mutex);
+    if (g_mqtt_mutex) xSemaphoreGive(g_mqtt_mutex);
+    return r;
 }
 
-static inline float abs_float(float x){ 
-    return (x < 0.0f) ? -x : x; 
-}
-
-// ==== Network Task ====
 static void vNetworkTask(void *param){
     (void)param;
-    
+
     if (cyw43_arch_init()){ 
-        printf("[NET] cyw43 init fail\n"); 
+        printf("[NET] cyw43 init failed\n"); 
         vTaskDelete(NULL); 
-        return; 
     }
-    printf("[NET] cyw43_arch initialized\n");
+    cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
     cyw43_arch_enable_sta_mode();
 
-    if (!ipaddr_aton(BROKER_IP_STR, &g_broker_ip)){
-        printf("[NET] Invalid broker IP: %s\n", BROKER_IP_STR);
-        vTaskDelete(NULL); return;
+    while (!wifi_connect_blocking(WIFI_CONNECT_TIMEOUT_MS)){
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
+    ip4_addr_set_u32(ip_2_ip4(&g_broker_ip), ipaddr_addr(BROKER_IP_STR));
+    printf("[NET] Broker %s:%d\n", BROKER_IP_STR, BROKER_PORT);
 
-    printf("[NET] Ready. Broker IP=%s\n", BROKER_IP_STR);
-
-    while (!g_shutdown){
-        if (!wifi_connect_blocking(WIFI_CONNECT_TIMEOUT_MS)){
-            vTaskDelay(pdMS_TO_TICKS(5000)); 
-            continue; 
+    for (;;){
+        if (g_shutdown){
+            mqtt_disconnect_now();
+            break;
         }
 
-        if (!mqtt_connect_blocking()){
-            vTaskDelay(pdMS_TO_TICKS(2000)); 
-            continue; 
+        if (!mqtt_is_connected()){
+            printf("[MQTT] Connecting...\n");
+            (void)mqtt_connect_blocking();
         }
-
-        while (mqtt_is_connected() && !g_shutdown){
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
-
-        printf("[NET] Lost connection, reconnecting...\n");
-        mqtt_disconnect_now();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(750));
     }
-
-    mqtt_disconnect_now();
-    cyw43_arch_deinit();
-    printf("[NET] Task exit\n");
     vTaskDelete(NULL);
 }
 
-// ======== Edge Follow Task ========
-static void edgeFollowTask(void *param){
-    (void)param;
+static inline int clamp_pwm_left(int v) {
+    if (v < PWM_MIN_LEFT) v = PWM_MIN_LEFT;
+    if (v > PWM_MAX_LEFT) v = PWM_MAX_LEFT;
+    return v;
+}
+
+static inline int clamp_pwm_right(int v) {
+    if (v < PWM_MIN_RIGHT) v = PWM_MIN_RIGHT;
+    if (v > PWM_MAX_RIGHT) v = PWM_MAX_RIGHT;
+    return v;
+}
+
+static inline float abs_float(float x) {
+    return x < 0 ? -x : x;
+}
+
+// ======== Edge Following Task with Exponential Corner Gain ========
+static void edgeFollowTask(void *pvParameters) {
+    (void)pvParameters;
     
     PIDController steer_pid;
     pid_init(&steer_pid, KP_STEER, KI_STEER, KD_STEER);
     
+    printf("[EDGE] Aggressive corner following initialized\n");
+    printf("     Target: %d, Corner threshold: %d\n", 
+           TARGET_EDGE_VALUE, CORNER_ERROR_THRESHOLD);
+    printf("     Corner gain multiplier: %.1fx\n", (double)CORNER_GAIN_MULTIPLIER);
+    
     uint64_t last_time = time_us_64();
     int telem_counter = 0;
     
-    // **MODIFICATION**: Wait for MQTT connection before starting
-    printf("[EDGE] Waiting for MQTT connection before starting motors...\n");
-    while (!mqtt_is_connected()) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    printf("[EDGE] MQTT connected! Reading initial sensor data...\n");
-    
-    // **MODIFICATION**: Publish first telemetry BEFORE any motor movement
-    vTaskDelay(pdMS_TO_TICKS(100));  // Small delay to ensure stable connection
-    
-    // Read initial sensor values
-    uint16_t initial_adc = adc_read();
-    float initial_error = (float)((int)initial_adc - TARGET_EDGE_VALUE);
-    
-    if (LINE_FOLLOWING_MODE == 0) {
-        // CENTER-LINE MODE
-        // No adjustment needed
-    } else {
-        // EDGE MODE
-        initial_error = g_current_edge_direction * initial_error;
-    }
-    
-    // Prepare first telemetry
-    char json[384];
-    uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
-    const char *initial_mode = "INIT";
-    const char *follow_mode = (LINE_FOLLOWING_MODE == 0) ? "CENTER" : "EDGE";
-    const char *edge_dir = (g_current_edge_direction > 0) ? "LEFT" : "RIGHT";
-    const char *direction = "STOPPED";
-    
-    int n = snprintf(json, sizeof(json),
-        "{\"timestamp\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
-        "\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\","
-        "\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
-        "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s}",
-        (unsigned)ts_ms, initial_adc, TARGET_EDGE_VALUE,
-        (double)initial_error, initial_mode, direction, follow_mode, edge_dir,
-        0, 0, 0,  // PWM values are 0 since motors haven't started
-        0.0, 0.0,  // Speeds are 0
-        "false");
-    
-    if (n > 0 && n < (int)sizeof(json)) {
-        mqtt_publish_str(MQTT_TOPIC_TELEM, json);
-        printf("[EDGE] First telemetry published: ADC=%u, Error=%.1f\n", 
-               initial_adc, (double)initial_error);
-        g_first_telemetry_published = true;
-    } else {
-        printf("[EDGE] ERROR: Failed to format initial telemetry\n");
-    }
-    
-    // Wait a moment to ensure publish completes
-    vTaskDelay(pdMS_TO_TICKS(200));
-    
-    printf("[EDGE] Starting motor control loop...\n");
     vTaskDelay(pdMS_TO_TICKS(500));
     
     for (;;) {
@@ -575,7 +495,6 @@ int main(void) {
 
     printf("\n========================================\n");
     printf("Edge Following - Bidirectional Support\n");
-    printf("WITH MQTT-FIRST STARTUP\n");
     printf("========================================\n");
     printf("Mode: %s\n", (LINE_FOLLOWING_MODE == 0) ? "CENTER-LINE" : "EDGE");
     if (LINE_FOLLOWING_MODE == 1) {
@@ -592,10 +511,6 @@ int main(void) {
         printf("  %d: %u\n", i+1, adc_val);
         sleep_ms(200);
     }
-    printf("========================================\n");
-    printf("Motors will START only after:\n");
-    printf("  1. MQTT connection established\n");
-    printf("  2. First telemetry published\n");
     printf("========================================\n\n");
 
     xTaskCreate(vNetworkTask, "net", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
@@ -603,7 +518,7 @@ int main(void) {
                 configMINIMAL_STACK_SIZE * 4,
                 NULL, tskIDLE_PRIORITY + 1, NULL);
 
-    printf("[MAIN] Starting with MQTT-first mode...\n");
+    printf("[MAIN] Starting bidirectional line following...\n");
     vTaskStartScheduler();
     while (true) { tight_loop_contents(); }
     return 0;

@@ -128,11 +128,12 @@ if nothing happen means mosquitto not running proceed with next task
 
 normal cmd
 cd "C:\Program Files\mosquitto"
+mosquitto.exe -c mosquitto.conf -v
 mosquitto.exe -v
 
 another normal cmd
 cd "C:\Program Files\mosquitto"
-mosquitto_sub -h localhost -p 1883 -t "pico/demo1/telemetry" -v
+mosquitto_sub -h localhost -p 1883 -t "pico/demo2/telemetry" -v
 
 window firewall defender 
 - turn window firewall defender off for private and public network
