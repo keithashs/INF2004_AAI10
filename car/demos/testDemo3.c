@@ -373,6 +373,13 @@ static void turn_right_90_degrees(void) {
     printf("║   EXECUTING 90 DEGREE RIGHT TURN                  ║\n");
     printf("╚════════════════════════════════════════════════════╝\n");
     
+    // Publish turn start event
+    char msg[256];
+    snprintf(msg, sizeof(msg), 
+             "{\"event\":\"turn_start\",\"type\":\"90_right\",\"duration_ms\":%u,\"pwm_left\":%d,\"pwm_right\":%d}",
+             TURN_90_DURATION_MS, TURN_PWM_SPEED, PWM_MIN_RIGHT);
+    mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
+    
     disable_pid_control();
     
     // ---- PRECISE 90 DEGREE RIGHT TURN ----
@@ -386,6 +393,10 @@ static void turn_right_90_degrees(void) {
     sleep_ms(300);
 
     printf("[TURN] 90-degree right turn complete\n\n");
+    
+    // Publish turn complete event
+    snprintf(msg, sizeof(msg), "{\"event\":\"turn_complete\",\"type\":\"90_right\"}");
+    mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
 }
 
 /* ========== Gentle Left-Turning Arc Search for Line ========== */
@@ -406,6 +417,13 @@ static void gentle_search_for_line(void) {
     printf("[GENTLE] Target ADC: %d (black line edge)\n", TARGET_EDGE_VALUE);
     printf("[GENTLE] Left motor PWM: %d, Right motor PWM: %d\n", 
            GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
+    
+    // Publish search start event
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "{\"event\":\"gentle_search_start\",\"baseline_adc\":%u,\"target_adc\":%d,\"pwm_left\":%d,\"pwm_right\":%d,\"max_time_ms\":%u}",
+             baseline_adc, TARGET_EDGE_VALUE, GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT, GENTLE_SEARCH_MAX_TIME_MS);
+    mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
     
     int reading_count = 0;
     uint16_t prev_adc = baseline_adc;
@@ -433,6 +451,15 @@ static void gentle_search_for_line(void) {
                    adc_raw, deviation_from_white,
                    approaching_line ? "YES" : "no",
                    on_edge ? "YES" : "no");
+            
+            // Publish telemetry every 10th reading
+            snprintf(msg, sizeof(msg),
+                     "{\"event\":\"gentle_search\",\"time_ms\":%lu,\"adc\":%u,\"deviation\":%d,\"approaching\":%s,\"on_edge\":%s}",
+                     (unsigned long)(to_ms_since_boot(get_absolute_time()) - start_ms),
+                     adc_raw, deviation_from_white,
+                     approaching_line ? "true" : "false",
+                     on_edge ? "true" : "false");
+            mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
         }
         
         // Line found if either condition is met
@@ -440,6 +467,14 @@ static void gentle_search_for_line(void) {
             printf("[GENTLE] ✓✓ BLACK LINE DETECTED! ADC=%u\n", adc_raw);
             printf("[GENTLE] Changed from baseline %u to %u (Δ=%+d)\n",
                    baseline_adc, adc_raw, (int)adc_raw - (int)baseline_adc);
+            
+            // Publish line detection event
+            snprintf(msg, sizeof(msg),
+                     "{\"event\":\"line_detected\",\"adc\":%u,\"baseline\":%u,\"delta\":%d,\"time_ms\":%lu}",
+                     adc_raw, baseline_adc, (int)adc_raw - (int)baseline_adc,
+                     (unsigned long)(to_ms_since_boot(get_absolute_time()) - start_ms));
+            mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
+            
             found = true;
             break;
         }
@@ -501,6 +536,12 @@ static void gentle_search_for_line(void) {
             if (reading_count++ % 5 == 0) {
                 printf("[CAPTURE] ADC=%u err=%+d steer=%.2f pwmL=%d pwmR=%d stable=%d/%d\n",
                        adc_now, error, (double)steer_factor, pwmL, pwmR, stable_readings, REQUIRED_STABLE);
+                
+                // Publish line capture telemetry
+                snprintf(msg, sizeof(msg),
+                         "{\"event\":\"line_capture\",\"adc\":%u,\"error\":%d,\"steer\":%.2f,\"pwm_left\":%d,\"pwm_right\":%d,\"stable\":%d}",
+                         adc_now, error, (double)steer_factor, pwmL, pwmR, stable_readings);
+                mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
             }
             
             sleep_ms(50);
@@ -510,11 +551,24 @@ static void gentle_search_for_line(void) {
         sleep_ms(200);
         
         printf("[GENTLE] ✓ Line capture complete! Transitioning to edge following.\n");
-        printf("[GENTLE] Final ADC: %u (target: %d)\n\n", adc_read(), TARGET_EDGE_VALUE);
+        uint16_t final_adc = adc_read();
+        printf("[GENTLE] Final ADC: %u (target: %d)\n\n", final_adc, TARGET_EDGE_VALUE);
+        
+        // Publish capture complete event
+        snprintf(msg, sizeof(msg),
+                 "{\"event\":\"line_capture_complete\",\"final_adc\":%u,\"target\":%d,\"stable_readings\":%d}",
+                 final_adc, TARGET_EDGE_VALUE, stable_readings);
+        mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
         
     } else {
         printf("[GENTLE] ✗ Line not found after %d ms - stopping.\n\n", 
                GENTLE_SEARCH_MAX_TIME_MS);
+        
+        // Publish search failed event
+        snprintf(msg, sizeof(msg),
+                 "{\"event\":\"gentle_search_failed\",\"max_time_ms\":%u}",
+                 GENTLE_SEARCH_MAX_TIME_MS);
+        mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
     }
 }
 
