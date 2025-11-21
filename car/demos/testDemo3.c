@@ -150,11 +150,19 @@
 // ======== NEW: TURN PARAMETERS ========
 #define TURN_90_DURATION_MS         1000 
 #define TURN_45_DURATION_MS   (TURN_90_DURATION_MS / 2)
-#define TURN_PWM_SPEED              150    // PWM for turning
+#define TURN_PWM_SPEED              110    // PWM for turning
 
 // NEW: Forward movement after turn (calibrate these)
 #define FORWARD_PWM_SPEED           150    // PWM when moving forward
 #define FORWARD_MS_PER_CM           70     // ~time per cm (tune experimentally)
+
+// ======== GENTLE LINE SEARCH PARAMETERS ========
+#define GENTLE_TURN_PWM_LEFT        110    // Slower left motor for gentle right arc
+#define GENTLE_TURN_PWM_RIGHT       145    // Faster right motor for gentle right arc
+#define GENTLE_SEARCH_MAX_TIME_MS   8000   // Maximum time for gentle search
+#define LINE_FOUND_THRESHOLD        200    // ADC change indicating line found
+#define LINE_CAPTURE_DURATION_MS    1500   // Time to actively track line after detection
+#define LINE_CAPTURE_BASE_PWM       130    // Base PWM during line capture phase
 
 // ======== ADC init ========
 static inline void init_line_adc(void) {
@@ -357,247 +365,156 @@ static inline float abs_float(float x) {
 
 /* ========== NEW: 90 Degree Right Turn Function ========== */
 
-/* ========== NEW: Dynamic Right Turn + Forward Using Width ========== */
+/* ========== NEW: 90 Degree Right Turn Only ========== */
 
-static void turn_right_and_avoid_obstacle(float forward_cm, float obstacle_width) {
+static void turn_right_90_degrees(void) {
     printf("\n");
     printf("╔════════════════════════════════════════════════════╗\n");
-    printf("║   OBSTACLE AVOIDANCE: TURN RIGHT & CLEAR          ║\n");
+    printf("║   EXECUTING 90 DEGREE RIGHT TURN                  ║\n");
     printf("╚════════════════════════════════════════════════════╝\n");
     
     disable_pid_control();
     
-    // ---- CALCULATE PRECISE TURN BASED ON OBSTACLE WIDTH ----
-    // Directly scale turn duration with obstacle width (linear relationship)
-    float width_ratio = (obstacle_width - MIN_OBSTACLE_WIDTH_CM) / 
-                       (MAX_OBSTACLE_WIDTH_CM - MIN_OBSTACLE_WIDTH_CM);
-    if (width_ratio < 0.0f) width_ratio = 0.0f;
-    if (width_ratio > 1.0f) width_ratio = 1.0f;
+    // ---- PRECISE 90 DEGREE RIGHT TURN ----
+    printf("[TURN] Turning right 90 degrees...\n");
+    printf("[TURN] Duration: %u ms at PWM %d\n", TURN_90_DURATION_MS, TURN_PWM_SPEED);
     
-    // Linear scaling for predictable behavior
-    uint32_t turn_duration = MIN_TURN_DURATION_MS + 
-                            (uint32_t)(width_ratio * (MAX_TURN_DURATION_MS - MIN_TURN_DURATION_MS));
-    
-    printf("[AVOID] Obstacle width: %.2f cm (ratio: %.2f)\n", obstacle_width, width_ratio);
-    printf("[AVOID] Turn duration: %u ms\n", turn_duration);
-    printf("[AVOID] Clearance distance: %.2f cm\n", forward_cm);
-    
-    // ---- RIGHT TURN ----
-    printf("[AVOID] Turning right...\n");
+    // Right turn: left motor forward, right motor slow/stopped
     forward_motor_manual(TURN_PWM_SPEED, PWM_MIN_RIGHT);
-    sleep_ms(turn_duration);
+    sleep_ms(TURN_90_DURATION_MS);
     stop_motor_pid();
-    sleep_ms(200);
+    sleep_ms(300);
 
-    // ---- MOVE FORWARD TO CLEAR OBSTACLE ----
-    if (forward_cm > 0.0f) {
-        uint32_t forward_ms = (uint32_t)(forward_cm * FORWARD_MS_PER_CM);
-        printf("[AVOID] Moving forward %.2f cm (~%u ms) to clear obstacle\n",
-               forward_cm, forward_ms);
-        forward_motor_manual(FORWARD_PWM_SPEED-50, FORWARD_PWM_SPEED-50);
-        sleep_ms(forward_ms);
-        stop_motor_pid();
-        sleep_ms(200);
-    }
-
-    printf("[AVOID] Obstacle cleared, searching for line...\n\n");
+    printf("[TURN] 90-degree right turn complete\n\n");
 }
 
-/* ========== Search for Line with Aggressive Zig-Zag Pattern ========== */
+/* ========== Gentle Left-Turning Arc Search for Line ========== */
 
-static void search_for_line_turn_left(void) {
+static void gentle_search_for_line(void) {
     printf("\n");
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║  AGGRESSIVE LINE SEARCH (ZIG-ZAG)        ║\n");
-    printf("╚════════════════════════════════════════════╝\n");
+    printf("╔════════════════════════════════════════════════════╗\n");
+    printf("║  GENTLE LEFT-TURNING ARC SEARCH FOR LINE         ║\n");
+    printf("╚════════════════════════════════════════════════════╝\n");
 
     disable_pid_control();
     
     uint32_t start_ms = to_ms_since_boot(get_absolute_time());
     bool found = false;
     
-    uint16_t prev_adc = adc_read();
-    const int REQUIRED_STABLE_READINGS = 1;  // Accept immediately on any detection!
+    uint16_t baseline_adc = adc_read();
+    printf("[GENTLE] Baseline ADC: %u (white surface)\n", baseline_adc);
+    printf("[GENTLE] Target ADC: %d (black line edge)\n", TARGET_EDGE_VALUE);
+    printf("[GENTLE] Left motor PWM: %d, Right motor PWM: %d\n", 
+           GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
     
-    printf("[SEARCH] Ultra-sensitive mode: threshold=%d, derivative=%d\n", 
-           LINE_DETECT_ERROR_THRESHOLD, LINE_EDGE_DERIVATIVE_THRESHOLD);
-    
-    // Phase 1: Short forward burst
-    printf("[SEARCH] Phase 1: Forward burst...\n");
-    uint32_t phase_time = 0;
     int reading_count = 0;
+    uint16_t prev_adc = baseline_adc;
     
-    while (phase_time < 1000) {  // 1 second
-        if ((to_ms_since_boot(get_absolute_time()) - start_ms) > FORWARD_SEARCH_MAX_TIME_MS) {
-            break;
-        }
-        
+    // Continuous gentle left-turning arc while moving forward
+    printf("[GENTLE] Starting gentle left arc search...\n");
+    
+    while ((to_ms_since_boot(get_absolute_time()) - start_ms) < GENTLE_SEARCH_MAX_TIME_MS) {
         uint16_t adc_raw = adc_read();
-        int error_raw = (int)adc_raw - TARGET_EDGE_VALUE;
-        int adc_derivative = abs((int)adc_raw - (int)prev_adc);
         
-        if (reading_count++ % 5 == 0) {
-            printf("[SEARCH] ADC=%u err=%d deriv=%d\n", adc_raw, error_raw, adc_derivative);
+        // Calculate how far we've deviated from white surface
+        int deviation_from_white = abs((int)adc_raw - (int)baseline_adc);
+        
+        // CORRECTED: Black line has HIGH ADC values (around 1800), white is LOW (around 200)
+        // Check if we're approaching the black line (ADC RISING toward TARGET)
+        bool approaching_line = (adc_raw > baseline_adc + LINE_FOUND_THRESHOLD);
+        
+        // Also check if we've crossed into the edge following range
+        int error_from_target = abs((int)adc_raw - TARGET_EDGE_VALUE);
+        bool on_edge = (error_from_target < 400);  // Within edge following range (more sensitive)
+        
+        if (reading_count++ % 10 == 0) {
+            printf("[GENTLE] t=%lums ADC=%u deviation=%d approaching=%s on_edge=%s\n",
+                   (unsigned long)(to_ms_since_boot(get_absolute_time()) - start_ms),
+                   adc_raw, deviation_from_white,
+                   approaching_line ? "YES" : "no",
+                   on_edge ? "YES" : "no");
         }
         
-        bool threshold_crossed = (error_raw > LINE_DETECT_ERROR_THRESHOLD ||
-                                 error_raw < -LINE_DETECT_ERROR_THRESHOLD);
-        bool edge_detected = (adc_derivative > LINE_EDGE_DERIVATIVE_THRESHOLD);
-        
-        if (threshold_crossed || edge_detected) {
-            printf("[SEARCH] ✓ LINE FOUND in forward! ADC=%u\n", adc_raw);
+        // Line found if either condition is met
+        if (approaching_line || on_edge) {
+            printf("[GENTLE] ✓✓ BLACK LINE DETECTED! ADC=%u\n", adc_raw);
+            printf("[GENTLE] Changed from baseline %u to %u (Δ=%+d)\n",
+                   baseline_adc, adc_raw, (int)adc_raw - (int)baseline_adc);
             found = true;
             break;
         }
         
         prev_adc = adc_raw;
-        forward_motor_manual(FORWARD_SEARCH_PWM, FORWARD_SEARCH_PWM);
-        sleep_ms(10);
-        phase_time += 10;
+        
+        // Gentle left turn: left motor slower, right motor faster
+        // This creates a wide, gentle arc to the left
+        forward_motor_manual(GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
+        sleep_ms(50);  // Slower sampling for smoother motion
     }
     
     stop_motor_pid();
     sleep_ms(100);
-    
-    if (found) {
-        printf("[SEARCH] Line found! Resuming edge following.\n\n");
-        return;
-    }
-    
-    // Phase 2: Zig-zag search - turn left, then right, then left again
-    printf("[SEARCH] Phase 2: Zig-zag sweep (L-R-L)...\n");
-    
-    // Sub-phase 2a: Turn LEFT
-    printf("[SEARCH] 2a: Sweeping LEFT...\n");
-    prev_adc = adc_read();
-    phase_time = 0;
-    reading_count = 0;
-    
-    while (phase_time < 2000) {  // 2 seconds left
-        if ((to_ms_since_boot(get_absolute_time()) - start_ms) > FORWARD_SEARCH_MAX_TIME_MS) {
-            break;
-        }
-
-        uint16_t adc_raw = adc_read();
-        int error_raw = (int)adc_raw - TARGET_EDGE_VALUE;
-        int adc_derivative = abs((int)adc_raw - (int)prev_adc);
-        
-        if (reading_count++ % 3 == 0) {
-            printf("[SEARCH-L] ADC=%u err=%d deriv=%d\n", adc_raw, error_raw, adc_derivative);
-        }
-        
-        bool threshold_crossed = (error_raw > LINE_DETECT_ERROR_THRESHOLD ||
-                                 error_raw < -LINE_DETECT_ERROR_THRESHOLD);
-        bool edge_detected = (adc_derivative > LINE_EDGE_DERIVATIVE_THRESHOLD);
-        
-        if (threshold_crossed || edge_detected) {
-            printf("[SEARCH] ✓ LINE FOUND in left sweep! ADC=%u\n", adc_raw);
-            found = true;
-            break;
-        }
-        
-        prev_adc = adc_raw;
-        // Turn left: right motor faster
-        forward_motor_manual(PWM_MIN_LEFT, TURN_PWM_SPEED - 30);
-        sleep_ms(10);
-        phase_time += 10;
-    }
-
-    stop_motor_pid();
-    sleep_ms(100);
-    
-    if (found) {
-        printf("[SEARCH] Line found! Resuming edge following.\n\n");
-        return;
-    }
-    
-    // Sub-phase 2b: Turn RIGHT (go back and beyond)
-    printf("[SEARCH] 2b: Sweeping RIGHT...\n");
-    prev_adc = adc_read();
-    phase_time = 0;
-    reading_count = 0;
-    
-    while (phase_time < 3000) {  // 3 seconds right (longer to cover more area)
-        if ((to_ms_since_boot(get_absolute_time()) - start_ms) > FORWARD_SEARCH_MAX_TIME_MS) {
-            break;
-        }
-
-        uint16_t adc_raw = adc_read();
-        int error_raw = (int)adc_raw - TARGET_EDGE_VALUE;
-        int adc_derivative = abs((int)adc_raw - (int)prev_adc);
-        
-        if (reading_count++ % 3 == 0) {
-            printf("[SEARCH-R] ADC=%u err=%d deriv=%d\n", adc_raw, error_raw, adc_derivative);
-        }
-        
-        bool threshold_crossed = (error_raw > LINE_DETECT_ERROR_THRESHOLD ||
-                                 error_raw < -LINE_DETECT_ERROR_THRESHOLD);
-        bool edge_detected = (adc_derivative > LINE_EDGE_DERIVATIVE_THRESHOLD);
-        
-        if (threshold_crossed || edge_detected) {
-            printf("[SEARCH] ✓ LINE FOUND in right sweep! ADC=%u\n", adc_raw);
-            found = true;
-            break;
-        }
-        
-        prev_adc = adc_raw;
-        // Turn right: left motor faster
-        forward_motor_manual(TURN_PWM_SPEED - 30, PWM_MIN_RIGHT);
-        sleep_ms(10);
-        phase_time += 10;
-    }
-
-    stop_motor_pid();
-    sleep_ms(100);
-    
-    if (found) {
-        printf("[SEARCH] Line found! Resuming edge following.\n\n");
-        return;
-    }
-    
-    // Sub-phase 2c: Turn LEFT again (final sweep)
-    printf("[SEARCH] 2c: Final LEFT sweep...\n");
-    prev_adc = adc_read();
-    phase_time = 0;
-    reading_count = 0;
-    
-    while (phase_time < 3000) {  // 3 seconds final left
-        if ((to_ms_since_boot(get_absolute_time()) - start_ms) > FORWARD_SEARCH_MAX_TIME_MS) {
-            break;
-        }
-
-        uint16_t adc_raw = adc_read();
-        int error_raw = (int)adc_raw - TARGET_EDGE_VALUE;
-        int adc_derivative = abs((int)adc_raw - (int)prev_adc);
-        
-        if (reading_count++ % 3 == 0) {
-            printf("[SEARCH-L2] ADC=%u err=%d deriv=%d\n", adc_raw, error_raw, adc_derivative);
-        }
-        
-        bool threshold_crossed = (error_raw > LINE_DETECT_ERROR_THRESHOLD ||
-                                 error_raw < -LINE_DETECT_ERROR_THRESHOLD);
-        bool edge_detected = (adc_derivative > LINE_EDGE_DERIVATIVE_THRESHOLD);
-        
-        if (threshold_crossed || edge_detected) {
-            printf("[SEARCH] ✓ LINE FOUND in final sweep! ADC=%u\n", adc_raw);
-            found = true;
-            break;
-        }
-        
-        prev_adc = adc_raw;
-        // Turn left: right motor faster
-        forward_motor_manual(PWM_MIN_LEFT, TURN_PWM_SPEED - 30);
-        sleep_ms(10);
-        phase_time += 10;
-    }
-
-    stop_motor_pid();
-    sleep_ms(200);
 
     if (found) {
-        printf("[SEARCH] Line found! Resuming edge following.\n\n");
+        printf("[GENTLE] ✓ Line found! Beginning active line capture...\n");
+        
+        // PHASE 2: Active line tracking - keep following the detected line
+        printf("[GENTLE] Phase 2: Active line tracking for %d ms\n", LINE_CAPTURE_DURATION_MS);
+        uint32_t capture_start = to_ms_since_boot(get_absolute_time());
+        int stable_readings = 0;
+        const int REQUIRED_STABLE = 15;  // Need 15 good readings to confirm lock
+        
+        while ((to_ms_since_boot(get_absolute_time()) - capture_start) < LINE_CAPTURE_DURATION_MS) {
+            uint16_t adc_now = adc_read();
+            int error = (int)adc_now - TARGET_EDGE_VALUE;
+            
+            // Simple proportional steering toward the target
+            float steer_factor = (float)error / 500.0f;  // Normalize error
+            if (steer_factor > 1.0f) steer_factor = 1.0f;
+            if (steer_factor < -1.0f) steer_factor = -1.0f;
+            
+            // Calculate motor speeds to track the line
+            int pwm_diff = (int)(steer_factor * 40.0f);  // Up to ±40 PWM differential
+            int pwmL = LINE_CAPTURE_BASE_PWM + pwm_diff;
+            int pwmR = LINE_CAPTURE_BASE_PWM - pwm_diff;
+            
+            // Clamp
+            if (pwmL < PWM_MIN_LEFT) pwmL = PWM_MIN_LEFT;
+            if (pwmL > 180) pwmL = 180;
+            if (pwmR < PWM_MIN_RIGHT) pwmR = PWM_MIN_RIGHT;
+            if (pwmR > 180) pwmR = 180;
+            
+            forward_motor_manual(pwmL, pwmR);
+            
+            // Check if we're maintaining good lock on the line
+            int abs_error = (error < 0) ? -error : error;
+            if (abs_error < 250) {
+                stable_readings++;
+                if (stable_readings >= REQUIRED_STABLE) {
+                    printf("[GENTLE] ✓✓ LINE LOCK CONFIRMED after %d stable readings!\n", stable_readings);
+                    break;
+                }
+            } else {
+                stable_readings = 0;  // Reset if we lose the line
+            }
+            
+            if (reading_count++ % 5 == 0) {
+                printf("[CAPTURE] ADC=%u err=%+d steer=%.2f pwmL=%d pwmR=%d stable=%d/%d\n",
+                       adc_now, error, (double)steer_factor, pwmL, pwmR, stable_readings, REQUIRED_STABLE);
+            }
+            
+            sleep_ms(50);
+        }
+        
+        stop_motor_pid();
+        sleep_ms(200);
+        
+        printf("[GENTLE] ✓ Line capture complete! Transitioning to edge following.\n");
+        printf("[GENTLE] Final ADC: %u (target: %d)\n\n", adc_read(), TARGET_EDGE_VALUE);
+        
     } else {
-        printf("[SEARCH] Line not found after full search - stopping.\n\n");
+        printf("[GENTLE] ✗ Line not found after %d ms - stopping.\n\n", 
+               GENTLE_SEARCH_MAX_TIME_MS);
     }
 }
 
@@ -885,20 +802,17 @@ static void run_width_scan_sequence(float adjacent) {
     servo_set_angle(SERVO_CENTER_ANGLE);
     sleep_ms(300);
     
-    // Calculate minimal clearance: just enough to clear the obstacle
-    float forward_cm = right_w + AVOID_EXTRA_LATERAL_CM;
-    printf("[SCAN] Calculated clearance: RIGHT %.2f cm + margin %.2f cm = %.2f cm total\n",
-        right_w, AVOID_EXTRA_LATERAL_CM, forward_cm);
+    printf("\n[SCAN] Obstacle measurement complete\n");
+    printf("[SCAN] LEFT: %.2f cm, RIGHT: %.2f cm, TOTAL: %.2f cm\n",
+           left_w, right_w, total_w);
     
-    // Use obstacle width directly for turn calculation
-    float obstacle_width = (total_w > 0 && total_w < 30.0f) ? total_w : (right_w * 1.5f);
-    printf("[SCAN] Using obstacle width %.2f cm for turn angle\n", obstacle_width);
-    
-    // Step 1: Turn right and move forward to clear obstacle
-    turn_right_and_avoid_obstacle(forward_cm, obstacle_width);
+    // Step 1: Execute 90-degree right turn
+    turn_right_90_degrees();
 
-    // Step 2: Immediately search for line by turning left
-    search_for_line_turn_left();
+    // Step 2: Search for line with gentle left-turning arc
+    gentle_search_for_line();
+    
+    printf("[SCAN] Obstacle avoidance sequence complete\n\n");
 }
 
 /* ======== Edge Following Task ======== */
