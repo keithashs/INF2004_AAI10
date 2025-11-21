@@ -29,10 +29,10 @@
 
 // ======== CONFIG (from demo2.c) ========
 // --- Wi-Fi & MQTT ---
-// #define WIFI_SSID                 "Keithiphone"
-// #define WIFI_PASS                 "testong1"
-#define WIFI_SSID                 "Jared"
-#define WIFI_PASS                 "1teddygodie"
+#define WIFI_SSID                 "Keithiphone"
+#define WIFI_PASS                 "testong1"
+// #define WIFI_SSID                 "Jared"
+// #define WIFI_PASS                 "1teddygodie"
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 #define AVOID_EXTRA_LATERAL_CM       2.0f   // Reduced from 5.0 for tighter turns
 #define SPIN_SEARCH_PWM              140
@@ -44,8 +44,8 @@
 #define MIN_TURN_DURATION_MS         400    // Very tight turn for small obstacles
 #define MAX_TURN_DURATION_MS         800    // Moderate turn for large obstacles
 
-// #define BROKER_IP_STR             "172.20.10.2"
-#define BROKER_IP_STR             "10.22.173.149"
+#define BROKER_IP_STR             "172.20.10.3"
+// #define BROKER_IP_STR             "10.22.173.149"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/demo3/telemetry"
 #define MQTT_TOPIC_STATUS         "pico/demo3/status"
@@ -268,7 +268,7 @@ static bool mqtt_connect_blocking(void){
     }
 
     struct mqtt_connect_client_info_t ci = {0};
-    ci.client_id  = "pico-demo2";
+    ci.client_id  = "pico-demo3";
     ci.keep_alive = 30;
 
     err_t er = mqtt_client_connect(g_mqtt, &g_broker_ip, BROKER_PORT, 

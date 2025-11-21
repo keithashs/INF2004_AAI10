@@ -197,7 +197,7 @@ target_link_libraries(testDemo3
     FreeRTOS-Kernel-Heap4
     encoder_lib
     motor_lib
-    # barcode_lib
+    barcode_lib
     imu_lib
     ultrasonic_lib
     servo_lib
