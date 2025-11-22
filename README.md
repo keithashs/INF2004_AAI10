@@ -119,7 +119,13 @@ Feel free to use, modify, and distribute for educational or research purposes.
 | Lee Xu Xiang Keith | 2400845 | System Testing & Documentation |
 
 
+https://mosquitto.org/download/
+download this:
+mosquitto-2.0.22-install-windows x64.exe
+
+ Error: Only one usage of each socket address (protocol/network address/port) is normally permitted.
 admin cmd
+netstat -ano | find "1883"
 tasklist | find "mosquitto"
 tasklist | findstr mosquitto
 taskkill /PID 25576 /F
@@ -129,11 +135,38 @@ if nothing happen means mosquitto not running proceed with next task
 normal cmd
 cd "C:\Program Files\mosquitto"
 mosquitto.exe -c mosquitto.conf -v
-mosquitto.exe -v
 
 another normal cmd
 cd "C:\Program Files\mosquitto"
-mosquitto_sub -h localhost -p 1883 -t "pico/demo2/telemetry" -v
+mosquitto_sub -h localhost -p 1883 -t "pico/demo1/telemetry" -v
+
+mosquitto.conf
+listener 1883 0.0.0.0
+allow_anonymous true
+socket_domain ipv4
+connection_messages true
+
 
 window firewall defender 
 - turn window firewall defender off for private and public network
+
+mosquitto -v
+mosquitto_sub -h localhost -t test
+mosquitto_pub -h localhost -t test -m "hello"
+http://127.0.0.1:1880
+http://127.0.0.1:1880/ui/
+node-red
+
+
+// --- Wi-Fi & MQTT ---
+#define WIFI_SSID                 "Keithiphone"
+#define WIFI_PASS                 "testong1"
+// #define WIFI_SSID                 "Jared"
+// #define WIFI_PASS                 "1teddygodie"
+// #define WIFI_SSID                 "Oppo"
+// #define WIFI_PASS                 "happy1234"
+#define WIFI_CONNECT_TIMEOUT_MS   20000
+
+#define BROKER_IP_STR             "172.20.10.3"
+// #define BROKER_IP_STR             "10.22.173.48"
+// #define BROKER_IP_STR             "10.86.216.48"
