@@ -1,42 +1,42 @@
-cmake_minimum_required(VERSION 3.13)
-set(PROJECT_NAME car)
-project(${PROJECT_NAME} C CXX ASM)
 
 # ---- Main application (links all sensor/actuator libraries) ----
-add_executable(${PROJECT_NAME}
+add_executable(main
     main.c
 )
 
-# Allow every module to include config.h from main/
-target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/..
+
+target_include_directories(main PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}           # car/demos (for lwipopts.h)
+    ${CMAKE_CURRENT_LIST_DIR}/..        # car/ (for config.h)
     ${CMAKE_CURRENT_LIST_DIR}/../motor
     ${CMAKE_CURRENT_LIST_DIR}/../encoder
-    # ${CMAKE_CURRENT_LIST_DIR}/../wifi
     ${CMAKE_CURRENT_LIST_DIR}/../imu
     ${CMAKE_CURRENT_LIST_DIR}/../pid
-    # ${CMAKE_CURRENT_LIST_DIR}/../ir/barcode
-    ${CMAKE_CURRENT_LIST_DIR}/../ir/line_following
+    ${CMAKE_CURRENT_LIST_DIR}/../ultrasonic
+    ${CMAKE_CURRENT_LIST_DIR}/../servo
+    ${CMAKE_SOURCE_DIR}/freertos_config
+    ${PICO_SDK_PATH}/src/rp2_common/pico_lwip/include
+
 )
 
-# Link all libraries and SDKs used by main
-target_link_libraries(${PROJECT_NAME}
-    motor_lib
-    encoder_lib
-    imu_lib
-    pid_lib
+target_link_libraries(main
     pico_stdlib
-    hardware_pwm
+    pico_cyw43_arch_lwip_sys_freertos
+    pico_lwip_mqtt
+    FreeRTOS-Kernel
+    FreeRTOS-Kernel-Heap4
+    encoder_lib
+    motor_lib
+    barcode_lib
+    imu_lib
+    ultrasonic_lib
+    servo_lib
     hardware_gpio
-    hardware_i2c
-    hardware_adc
+    hardware_pwm
     hardware_timer
-    wifi_connect_lib    # only wifi connection library
+    hardware_i2c
 )
 
-# create map/bin/hex file etc.
-pico_add_extra_outputs(${PROJECT_NAME})
-
-# enable usb output, disable uart output
-pico_enable_stdio_usb(${PROJECT_NAME} 1)
-pico_enable_stdio_uart(${PROJECT_NAME} 0)
+pico_add_extra_outputs(main)
+pico_enable_stdio_usb(main 1)
+pico_enable_stdio_uart(main 0)

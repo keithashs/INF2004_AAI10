@@ -52,13 +52,6 @@
 #define MQTT_TOPIC_SENSOR         "pico/demo3/sensor"
 #define MQTT_TOPIC_MOTOR          "pico/demo3/motor"
 #define MQTT_TOPIC_OBSTACLE       "pico/demo3/obstacle"
-// ======== TURN + LINE RE-ENTRY PARAMETERS ========
-#define FORWARD_AFTER_REALIGN_PWM      150   // PWM for straight drive after last 90° left
-#define LINE_DETECT_ERROR_THRESHOLD    150   // Very sensitive - any significant deviation
-#define FORWARD_SEARCH_MAX_TIME_MS     12000 // Extended to 12 seconds
-
-#define FORWARD_SEARCH_PWM           110     // Very slow for maximum detection window
-#define LINE_EDGE_DERIVATIVE_THRESHOLD 50    // Extremely sensitive to any ADC change   
 
 #ifndef LINE_SENSOR_PIN
 #define LINE_SENSOR_PIN 28
