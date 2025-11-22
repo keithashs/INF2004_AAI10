@@ -141,17 +141,17 @@
 #define OBSTACLE_CHECK_INTERVAL     5    // Check every 5 loops for faster response
 
 // ======== NEW: TURN PARAMETERS ========
-#define TURN_90_DURATION_MS         1000 
+#define TURN_90_DURATION_MS         900 
 #define TURN_45_DURATION_MS   (TURN_90_DURATION_MS / 2)
-#define TURN_PWM_SPEED              110    // PWM for turning
+#define TURN_PWM_SPEED              150    // PWM for turning
 
 // NEW: Forward movement after turn (calibrate these)
 #define FORWARD_PWM_SPEED           150    // PWM when moving forward
 #define FORWARD_MS_PER_CM           70     // ~time per cm (tune experimentally)
 
 // ======== GENTLE LINE SEARCH PARAMETERS ========
-#define GENTLE_TURN_PWM_LEFT        110    // Slower left motor for gentle right arc
-#define GENTLE_TURN_PWM_RIGHT       145    // Faster right motor for gentle right arc
+#define GENTLE_TURN_PWM_LEFT        90    // Slower left motor for gentle right arc
+#define GENTLE_TURN_PWM_RIGHT       125    // Faster right motor for gentle right arc
 #define GENTLE_SEARCH_MAX_TIME_MS   8000   // Maximum time for gentle search
 #define LINE_FOUND_THRESHOLD        200    // ADC change indicating line found
 #define LINE_CAPTURE_DURATION_MS    1500   // Time to actively track line after detection

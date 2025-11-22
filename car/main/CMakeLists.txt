@@ -6,7 +6,7 @@ add_executable(main
 
 
 target_include_directories(main PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}           # car/demos (for lwipopts.h)
+    ${CMAKE_CURRENT_LIST_DIR}           # car/main (for lwipopts.h)
     ${CMAKE_CURRENT_LIST_DIR}/..        # car/ (for config.h)
     ${CMAKE_CURRENT_LIST_DIR}/../motor
     ${CMAKE_CURRENT_LIST_DIR}/../encoder

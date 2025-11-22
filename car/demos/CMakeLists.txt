@@ -141,8 +141,8 @@ add_executable(testDemo3
 )
 
 target_include_directories(testDemo3 PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}           # car/demos (for lwipopts.h)
     ${CMAKE_CURRENT_LIST_DIR}/..        # car/ (for config.h)
+    ${CMAKE_CURRENT_LIST_DIR}/../main   # car/main (for lwipopts.h)
     ${CMAKE_CURRENT_LIST_DIR}/../motor
     ${CMAKE_CURRENT_LIST_DIR}/../encoder
     ${CMAKE_CURRENT_LIST_DIR}/../imu
