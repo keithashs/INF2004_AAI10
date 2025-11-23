@@ -27,6 +27,7 @@
 #include "servo.h"
 #include "ultrasonic.h"
 #include "ir_linefollow.h"
+#include "imu.h"
 
 // ======== CONFIG ========
 // --- Wi-Fi & MQTT ---
@@ -44,6 +45,7 @@
 #define MQTT_TOPIC_SENSOR         "pico/main/sensor"
 #define MQTT_TOPIC_MOTOR          "pico/main/motor"
 #define MQTT_TOPIC_OBSTACLE       "pico/main/obstacle"
+
 
 // ======== SERVO SCAN ANGLES ========
 #define SERVO_CENTER_ANGLE          90.0f
@@ -63,6 +65,10 @@
 #define LINE_CAPTURE_DURATION_MS    4000
 #define LINE_CAPTURE_BASE_PWM       135
 
+// ======== HEADING FILTER CONFIG (IMU) ========
+#define HDG_EMA_ALPHA        0.20f
+#define HEADING_OFFSET_DEG   0.0f   // keep 0 so logged heading ≈ real facing
+
 /* ============================ Wi-Fi / MQTT ========================= */
 static mqtt_client_t *g_mqtt = NULL;
 static ip_addr_t      g_broker_ip;
@@ -75,6 +81,22 @@ static int    g_error_history_count = 0;
 
 // Avoidance cooldown to prevent snapping back to old line
 static volatile int g_avoidance_cooldown_steps = 0;
+
+// ======== IMU GLOBALS ========
+static imu_t g_imu;
+static bool  g_imu_ok       = false;
+static float g_hdg_deg      = 0.0f;  // filtered heading (deg 0..360)
+static float g_hdg_raw_deg  = 0.0f;  // raw heading before EMA
+
+// ======== Small helpers ========
+static inline float wrap_deg_0_360(float e){
+    while (e < 0.0f)   e += 360.0f;
+    while (e >= 360.0f) e -= 360.0f;
+    return e;
+}
+static inline float ema(float prev, float x, float a){
+    return prev*(1.0f - a) + x*a;
+}
 
 static void mqtt_disconnect_now(void){
     if (!g_mqtt) return;
@@ -434,6 +456,8 @@ static void gentle_search_for_line(void) {
 }
 
 
+/* ======== Obstacle Width Scan + MQTT Publish ======== */
+
 static void run_width_scan_and_publish(float adjacent) {
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════════╗\n");
@@ -510,6 +534,11 @@ static void edgeFollowTask(void *pvParameters) {
     pid_init(&steer_pid, KP_STEER, KI_STEER, KD_STEER);
 
     printf("[EDGE] Edge following initialized\n");
+    if (g_imu_ok) {
+        printf("[IMU] Heading telemetry enabled (hdg in JSON)\n");
+    } else {
+        printf("[IMU] NOT available - hdg will stay 0.0\n");
+    }
 
     uint64_t last_time = time_us_64();
     int telem_counter = 0;
@@ -523,6 +552,15 @@ static void edgeFollowTask(void *pvParameters) {
         float dt = (now - last_time) / 1e6f;
         if (dt < 0.001f) dt = 0.02f;
         last_time = now;
+
+        // --- IMU update: keep heading fresh while robot moves ---
+        if (g_imu_ok) {
+            float raw = imu_update_and_get_heading(&g_imu);
+            raw += HEADING_OFFSET_DEG;
+            raw = wrap_deg_0_360(raw);
+            g_hdg_raw_deg = raw;
+            g_hdg_deg = ema(g_hdg_deg, raw, HDG_EMA_ALPHA);
+        }
 
         obstacle_check_counter++;
         if (obstacle_check_counter >= OBSTACLE_CHECK_INTERVAL) {
@@ -636,28 +674,33 @@ static void edgeFollowTask(void *pvParameters) {
                 turning_left ? "LEFT" : (turning_right ? "RIGHT" : "STRAIGHT");
             int pwm_diff = pwmL - pwmR;
 
-            printf("[%s-%s] ADC=%u err=%+.0f %s %s pwmL=%d pwmR=%d diff=%d\n",
+            printf("[%s-%s] ADC=%u err=%+.0f %s %s pwmL=%d pwmR=%d diff=%d hdg=%.1f\n",
                    follow_mode, edge_dir, adc_raw, (double)error,
-                   mode, direction, pwmL, pwmR, pwm_diff);
+                   mode, direction, pwmL, pwmR, pwm_diff,
+                   (double)g_hdg_deg);
 
             if (mqtt_is_connected()){
                 char json[384];
                 uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
                 int n;
 
+                // ----- MAIN TELEMETRY (add "hdg") -----
                 n = snprintf(json, sizeof(json),
                     "{\"timestamp\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
                     "\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\","
                     "\"edge\":\"%s\",\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
-                    "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s}",
+                    "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s,"
+                    "\"hdg\":%.1f}",
                     (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
                     (double)error, mode, direction, follow_mode, edge_dir,
                     pwmL, pwmR, pwm_diff,
-                    (double)vL, (double)vR, in_corner ? "true" : "false");
+                    (double)vL, (double)vR, in_corner ? "true" : "false",
+                    (double)g_hdg_deg);   // <<< heading deg from IMU
                 if (n > 0 && n < (int)sizeof(json)) {
                     mqtt_publish_str(MQTT_TOPIC_TELEM, json);
                 }
 
+                // SENSOR JSON
                 n = snprintf(json, sizeof(json),
                     "{\"adc\":%u,\"error\":%.1f,\"target\":%d}",
                     adc_raw, (double)error, TARGET_EDGE_VALUE);
@@ -665,6 +708,7 @@ static void edgeFollowTask(void *pvParameters) {
                     mqtt_publish_str(MQTT_TOPIC_SENSOR, json);
                 }
 
+                // MOTOR JSON
                 n = snprintf(json, sizeof(json),
                     "{\"pwmL\":%d,\"pwmR\":%d,\"speedL\":%.2f,\"speedR\":%.2f}",
                     pwmL, pwmR, (double)vL, (double)vR);
@@ -672,6 +716,7 @@ static void edgeFollowTask(void *pvParameters) {
                     mqtt_publish_str(MQTT_TOPIC_MOTOR, json);
                 }
 
+                // STATUS JSON (periodic)
                 if (telem_counter % 50 == 0) {
                     n = snprintf(json, sizeof(json),
                         "{\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\","
@@ -700,6 +745,31 @@ int main(void) {
     ultrasonic_init();
     servo_set_angle(SERVO_CENTER_ANGLE);
     sleep_ms(300);
+
+    // ---------- IMU INIT (like testDemo1.c, but only for heading telemetry) ----------
+    g_imu.i2c      = i2c1;
+    g_imu.i2c_baud = IMU_I2C_BAUD;
+    g_imu.pin_sda  = IMU_SDA_PIN;
+    g_imu.pin_scl  = IMU_SCL_PIN;
+    g_imu.mx_off = g_imu.my_off = g_imu.mz_off = 0.0f;
+
+    g_imu_ok = imu_init(&g_imu);
+    if (g_imu_ok) {
+        printf("[IMU] Init OK, priming heading filter...\n");
+        float filt = 0.0f;
+        for (int i = 0; i < 20; ++i) {
+            float h = imu_update_and_get_heading(&g_imu);
+            h += HEADING_OFFSET_DEG;
+            h = wrap_deg_0_360(h);
+            filt = ema(filt, h, HDG_EMA_ALPHA);
+            sleep_ms(10);
+        }
+        g_hdg_deg = filt;
+        g_hdg_raw_deg = filt;
+        printf("[IMU] Initial heading = %.1f deg\n", (double)g_hdg_deg);
+    } else {
+        printf("[IMU] Init FAILED - hdg will stay 0.0 in telemetry\n");
+    }
 
     g_mqtt_mutex = xSemaphoreCreateMutex();
 
