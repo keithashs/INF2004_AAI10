@@ -30,6 +30,11 @@
 #define FULL_CIRCLE    360.0f
 #define CONTINUOUS_TURN -1.0f
 
+// ======== TURN PARAMETERS (from testDemo3.c) ========
+#define TURN_90_DURATION_MS         900
+#define TURN_45_DURATION_MS         (TURN_90_DURATION_MS / 2)
+#define TURN_PWM_SPEED              150
+
 typedef enum { PID_STOP, PID_FWD, PID_REV, PID_LEFT, PID_RIGHT, PID_TURNING, PID_DISABLED } PIDState;
 
 // Init
@@ -57,6 +62,12 @@ void reverse_motor_pid(float target_speed);
 void turn_motor_pid(int direction, float target_speed, float target_turn_angle);
 void stop_motor_pid(void);
 bool turn_until_angle(float angle);
+
+// ======== NEW: Precise Turn Functions (from testDemo3.c) ========
+void motor_turn_right_90(void);  // Execute precise 90-degree right turn
+void motor_turn_left_90(void);   // Execute precise 90-degree left turn
+void motor_turn_right_45(void);  // Execute precise 45-degree right turn
+void motor_turn_left_45(void);   // Execute precise 45-degree left turn
 
 // PID task (optional)
 void pid_task(void *params);

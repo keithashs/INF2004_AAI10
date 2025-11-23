@@ -11,4 +11,5 @@ target_link_libraries(ultrasonic_lib
   pico_stdlib
   hardware_gpio
   hardware_timer
+  servo_lib
 )

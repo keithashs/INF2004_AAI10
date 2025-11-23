@@ -98,6 +98,74 @@ float compute_pid_pwm(float target, float current, float *I, float *prev){
     return Kp*e + Ki*(*I) + Kd*d;
 }
 
+// ======== NEW: Precise Turn Functions (from testDemo3.c) ========
+
+void motor_turn_right_90(void) {
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════╗\n");
+    printf("║   EXECUTING 90 DEGREE RIGHT TURN                  ║\n");
+    printf("╚════════════════════════════════════════════════════╝\n");
+    
+    disable_pid_control();
+    
+    printf("[TURN] Turning right 90 degrees...\n");
+    printf("[TURN] Duration: %u ms at PWM %d\n", TURN_90_DURATION_MS, TURN_PWM_SPEED);
+    
+    // Right turn: left motor forward, right motor slow/stopped
+    forward_motor_manual(TURN_PWM_SPEED, PWM_MIN_RIGHT);
+    sleep_ms(TURN_90_DURATION_MS);
+    stop_motor_pid();
+    sleep_ms(300);
+
+    printf("[TURN] 90-degree right turn complete\n\n");
+}
+
+void motor_turn_left_90(void) {
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════╗\n");
+    printf("║   EXECUTING 90 DEGREE LEFT TURN                   ║\n");
+    printf("╚════════════════════════════════════════════════════╝\n");
+    
+    disable_pid_control();
+    
+    printf("[TURN] Turning left 90 degrees...\n");
+    printf("[TURN] Duration: %u ms at PWM %d\n", TURN_90_DURATION_MS, TURN_PWM_SPEED);
+    
+    // Left turn: right motor forward, left motor slow/stopped
+    forward_motor_manual(PWM_MIN_LEFT, TURN_PWM_SPEED);
+    sleep_ms(TURN_90_DURATION_MS);
+    stop_motor_pid();
+    sleep_ms(300);
+
+    printf("[TURN] 90-degree left turn complete\n\n");
+}
+
+void motor_turn_right_45(void) {
+    printf("[TURN] Executing 45-degree right turn for %u ms at PWM %d...\n",
+           TURN_45_DURATION_MS, TURN_PWM_SPEED);
+    
+    disable_pid_control();
+    forward_motor_manual(TURN_PWM_SPEED, PWM_MIN_RIGHT);
+    sleep_ms(TURN_45_DURATION_MS);
+    stop_motor_pid();
+    sleep_ms(200);
+    
+    printf("[TURN] 45-degree right turn complete\n");
+}
+
+void motor_turn_left_45(void) {
+    printf("[TURN] Executing 45-degree left turn for %u ms at PWM %d...\n",
+           TURN_45_DURATION_MS, TURN_PWM_SPEED);
+    
+    disable_pid_control();
+    forward_motor_manual(PWM_MIN_LEFT, TURN_PWM_SPEED);
+    sleep_ms(TURN_45_DURATION_MS);
+    stop_motor_pid();
+    sleep_ms(200);
+    
+    printf("[TURN] 45-degree left turn complete\n");
+}
+
 // Example PID task (yields if disabled)
 void pid_task(void *params){
     float iL=0.f,iR=0.f, eL=0.f,eR=0.f;
