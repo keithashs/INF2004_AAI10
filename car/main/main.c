@@ -27,22 +27,16 @@
 #include "servo.h"
 #include "ultrasonic.h"
 
-// ======== CONFIG (from demo2.c) ========
+// ======== CONFIG ========
 // --- Wi-Fi & MQTT ---
 #define WIFI_SSID                 "Keithiphone"
 #define WIFI_PASS                 "testong1"
 // #define WIFI_SSID                 "Jared"
 // #define WIFI_PASS                 "1teddygodie"
 #define WIFI_CONNECT_TIMEOUT_MS   20000
-#define AVOID_EXTRA_LATERAL_CM       2.0f   // Reduced from 5.0 for tighter turns
+#define AVOID_EXTRA_LATERAL_CM       2.0f
 #define SPIN_SEARCH_PWM              140
 #define SPIN_SEARCH_MAX_TIME_MS      3000
-
-// Dynamic turn angle parameters - precise turns based on obstacle width
-#define MIN_OBSTACLE_WIDTH_CM        5.0f   // Minimum width for scaling
-#define MAX_OBSTACLE_WIDTH_CM        25.0f  // Maximum width for scaling
-#define MIN_TURN_DURATION_MS         400    // Very tight turn for small obstacles
-#define MAX_TURN_DURATION_MS         800    // Moderate turn for large obstacles
 
 #define BROKER_IP_STR             "172.20.10.3"
 // #define BROKER_IP_STR             "10.22.173.149"
@@ -52,6 +46,15 @@
 #define MQTT_TOPIC_SENSOR         "pico/main/sensor"
 #define MQTT_TOPIC_MOTOR          "pico/main/motor"
 #define MQTT_TOPIC_OBSTACLE       "pico/main/obstacle"
+
+// ======== CONFIG (from demo2.c) ========
+
+// Dynamic turn angle parameters - precise turns based on obstacle width
+#define MIN_OBSTACLE_WIDTH_CM        5.0f   // Minimum width for scaling
+#define MAX_OBSTACLE_WIDTH_CM        25.0f  // Maximum width for scaling
+#define MIN_TURN_DURATION_MS         400    // Very tight turn for small obstacles
+#define MAX_TURN_DURATION_MS         800    // Moderate turn for large obstacles
+
 #ifndef LINE_SENSOR_PIN
 #define LINE_SENSOR_PIN 28
 #endif

@@ -11,7 +11,7 @@ target_include_directories(main PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../motor
     ${CMAKE_CURRENT_LIST_DIR}/../encoder
     ${CMAKE_CURRENT_LIST_DIR}/../imu
-    ${CMAKE_CURRENT_LIST_DIR}/../pid
+    ${CMAKE_CURRENT_LIST_DIR}/../ir
     ${CMAKE_CURRENT_LIST_DIR}/../ultrasonic
     ${CMAKE_CURRENT_LIST_DIR}/../servo
     ${CMAKE_SOURCE_DIR}/freertos_config
@@ -29,6 +29,7 @@ target_link_libraries(main
     motor_lib
     barcode_lib
     imu_lib
+    ir_linefollow_lib
     ultrasonic_lib
     servo_lib
     hardware_gpio
