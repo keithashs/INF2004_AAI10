@@ -237,7 +237,6 @@ static void gentle_search_for_line(void) {
     mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
 
     int reading_count = 0;
-    uint16_t prev_adc = baseline_adc;
 
     printf("[GENTLE] Starting gentle left arc search...\n");
 
@@ -282,8 +281,6 @@ static void gentle_search_for_line(void) {
             found = true;
             break;
         }
-
-        prev_adc = adc_raw;
 
         // Gentle left turn: left motor slower, right motor faster
         forward_motor_manual(GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
