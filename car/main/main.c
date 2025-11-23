@@ -88,15 +88,15 @@ static void request_shutdown(void){
     g_shutdown = true;
 }
 
-static void mqtt_pub_cb(void *arg, err_t result){ 
-    (void)arg; (void)result; 
+static void mqtt_pub_cb(void *arg, err_t result){
+    (void)arg; (void)result;
 }
 
 static void mqtt_conn_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status){
     (void)client; (void)arg;
-    if (status == MQTT_CONNECT_ACCEPTED) 
+    if (status == MQTT_CONNECT_ACCEPTED)
         printf("[MQTT] Connected\n");
-    else 
+    else
         printf("[MQTT] Disconnected status=%d\n", (int)status);
 }
 
@@ -104,30 +104,30 @@ static bool wifi_connect_blocking(uint32_t timeout_ms){
     printf("[NET] Connecting to Wi-Fi SSID: %s\n", WIFI_SSID);
     int err = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS,
                                                  CYW43_AUTH_WPA2_AES_PSK, timeout_ms);
-    if (err){ 
-        printf("[NET] Wi-Fi connect failed (err=%d)\n", err); 
-        return false; 
+    if (err){
+        printf("[NET] Wi-Fi connect failed (err=%d)\n", err);
+        return false;
     }
-    printf("[NET] Wi-Fi connected\n"); 
+    printf("[NET] Wi-Fi connected\n");
     return true;
 }
 
 static bool mqtt_connect_blocking(void){
     if (!g_mqtt) g_mqtt = mqtt_client_new();
-    if (!g_mqtt){ 
-        printf("[MQTT] client_new failed\n"); 
-        return false; 
+    if (!g_mqtt){
+        printf("[MQTT] client_new failed\n");
+        return false;
     }
 
     struct mqtt_connect_client_info_t ci = {0};
     ci.client_id  = "pico-main";
     ci.keep_alive = 30;
 
-    err_t er = mqtt_client_connect(g_mqtt, &g_broker_ip, BROKER_PORT, 
+    err_t er = mqtt_client_connect(g_mqtt, &g_broker_ip, BROKER_PORT,
                                    mqtt_conn_cb, NULL, &ci);
-    if (er != ERR_OK){ 
-        printf("[MQTT] connect err=%d\n", er); 
-        return false; 
+    if (er != ERR_OK){
+        printf("[MQTT] connect err=%d\n", er);
+        return false;
     }
     vTaskDelay(pdMS_TO_TICKS(500));
     return mqtt_client_is_connected(g_mqtt);
@@ -142,7 +142,7 @@ static err_t mqtt_publish_str(const char *topic, const char *payload){
     if (g_mqtt_mutex) xSemaphoreTake(g_mqtt_mutex, portMAX_DELAY);
     cyw43_arch_lwip_begin();
     u16_t len = strlen(payload);
-    err_t r = mqtt_publish(g_mqtt, topic, (const u8_t*)payload, 
+    err_t r = mqtt_publish(g_mqtt, topic, (const u8_t*)payload,
                           (u16_t)len, 0, 0, mqtt_pub_cb, NULL);
     cyw43_arch_lwip_end();
     if (g_mqtt_mutex) xSemaphoreGive(g_mqtt_mutex);
@@ -151,9 +151,9 @@ static err_t mqtt_publish_str(const char *topic, const char *payload){
 
 static void vNetworkTask(void *param){
     (void)param;
-    if (cyw43_arch_init()){ 
-        printf("[NET] cyw43 init failed\n"); 
-        vTaskDelete(NULL); 
+    if (cyw43_arch_init()){
+        printf("[NET] cyw43 init failed\n");
+        vTaskDelete(NULL);
     }
 
     cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
@@ -194,90 +194,97 @@ static void gentle_search_for_line(void) {
     printf("╚════════════════════════════════════════════════════╝\n");
 
     disable_pid_control();
-    
+
     uint32_t start_ms = to_ms_since_boot(get_absolute_time());
     bool found = false;
-    
+
     uint16_t baseline_adc = read_line_adc();
     printf("[GENTLE] Baseline ADC: %u (white surface)\n", baseline_adc);
     printf("[GENTLE] Target ADC: %d (black line edge)\n", TARGET_EDGE_VALUE);
-    printf("[GENTLE] Left motor PWM: %d, Right motor PWM: %d\n", 
+    printf("[GENTLE] Left motor PWM: %d, Right motor PWM: %d\n",
            GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
-    
+
     // Publish search start event
     char msg[256];
     snprintf(msg, sizeof(msg),
-             "{\"event\":\"gentle_search_start\",\"baseline_adc\":%u,\"target_adc\":%d,\"pwm_left\":%d,\"pwm_right\":%d,\"max_time_ms\":%u}",
-             baseline_adc, TARGET_EDGE_VALUE, GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT, GENTLE_SEARCH_MAX_TIME_MS);
+             "{\"event\":\"gentle_search_start\",\"baseline_adc\":%u,\"target_adc\":%d,"
+             "\"pwm_left\":%d,\"pwm_right\":%d,\"max_time_ms\":%u}",
+             baseline_adc, TARGET_EDGE_VALUE,
+             GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT,
+             GENTLE_SEARCH_MAX_TIME_MS);
     mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
-    
+
     int reading_count = 0;
     uint16_t prev_adc = baseline_adc;
-    
+
     printf("[GENTLE] Starting gentle left arc search...\n");
-    
+
     while ((to_ms_since_boot(get_absolute_time()) - start_ms) < GENTLE_SEARCH_MAX_TIME_MS) {
         uint16_t adc_raw = read_line_adc();
-        
+
         int deviation_from_white = abs((int)adc_raw - (int)baseline_adc);
-        
+
         bool on_edge = (adc_raw >= LINE_EDGE_MIN_ADC && adc_raw <= LINE_EDGE_MAX_ADC);
         bool approaching_line = (adc_raw >= LINE_EDGE_MIN_ADC);
-        
+
         if (reading_count++ % 10 == 0) {
             printf("[GENTLE] t=%lums ADC=%u deviation=%d approaching=%s on_edge=%s\n",
                    (unsigned long)(to_ms_since_boot(get_absolute_time()) - start_ms),
                    adc_raw, deviation_from_white,
                    approaching_line ? "YES" : "no",
                    on_edge ? "YES" : "no");
-            
+
             snprintf(msg, sizeof(msg),
-                     "{\"event\":\"gentle_search\",\"time_ms\":%lu,\"adc\":%u,\"deviation\":%d,\"approaching\":%s,\"on_edge\":%s}",
+                     "{\"event\":\"gentle_search\",\"time_ms\":%lu,\"adc\":%u,"
+                     "\"deviation\":%d,\"approaching\":%s,\"on_edge\":%s}",
                      (unsigned long)(to_ms_since_boot(get_absolute_time()) - start_ms),
                      adc_raw, deviation_from_white,
                      approaching_line ? "true" : "false",
                      on_edge ? "true" : "false");
             mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
         }
-        
+
         if (approaching_line || on_edge) {
             printf("[GENTLE] ✓✓ BLACK LINE DETECTED! ADC=%u\n", adc_raw);
             printf("[GENTLE] Changed from baseline %u to %u (Δ=%+d)\n",
                    baseline_adc, adc_raw, (int)adc_raw - (int)baseline_adc);
-            
+
             snprintf(msg, sizeof(msg),
-                     "{\"event\":\"line_detected\",\"adc\":%u,\"baseline\":%u,\"delta\":%d,\"time_ms\":%lu}",
-                     adc_raw, baseline_adc, (int)adc_raw - (int)baseline_adc,
+                     "{\"event\":\"line_detected\",\"adc\":%u,\"baseline\":%u,"
+                     "\"delta\":%d,\"time_ms\":%lu}",
+                     adc_raw, baseline_adc,
+                     (int)adc_raw - (int)baseline_adc,
                      (unsigned long)(to_ms_since_boot(get_absolute_time()) - start_ms));
             mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
-            
+
             found = true;
             break;
         }
-        
+
         prev_adc = adc_raw;
-        
+
         // Gentle left turn: left motor slower, right motor faster
         forward_motor_manual(GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
         sleep_ms(20);
     }
-    
+
     stop_motor_pid();
     sleep_ms(100);
 
     if (found) {
         uint16_t detection_adc = read_line_adc();
         printf("[GENTLE] ✓ Line detected! ADC=%u\n", detection_adc);
-        
+
         // IMMEDIATE BRAKE
         stop_motor_pid();
         sleep_ms(250);
-        
+
         // Smart positioning
         uint16_t post_brake_adc = read_line_adc();
         int post_brake_error = (int)post_brake_adc - TARGET_EDGE_VALUE;
-        printf("[GENTLE] Post-brake position: ADC=%u, error=%+d\n", post_brake_adc, post_brake_error);
-        
+        printf("[GENTLE] Post-brake position: ADC=%u, error=%+d\n",
+               post_brake_adc, post_brake_error);
+
         // Corrective maneuvers
         if (post_brake_adc > TARGET_EDGE_VALUE + 800) {
             printf("[GENTLE] Overshot into black! Reversing left to find edge...\n");
@@ -293,39 +300,43 @@ static void gentle_search_for_line(void) {
             stop_motor_pid();
             sleep_ms(100);
         }
-        
+
         // PHASE 2: Aggressive edge-following
-        printf("[GENTLE] Phase 2: Aggressive edge-following for %d ms\n", LINE_CAPTURE_DURATION_MS);
-        
+        printf("[GENTLE] Phase 2: Aggressive edge-following for %d ms\n",
+               LINE_CAPTURE_DURATION_MS);
+
         PIDController capture_pid;
         pid_init(&capture_pid, KP_STEER, KI_STEER, KD_STEER);
-        
+
         uint64_t last_capture_time = time_us_64();
         uint32_t capture_start = to_ms_since_boot(get_absolute_time());
         int stable_readings = 0;
         const int REQUIRED_STABLE = 10;
-        
-        while ((to_ms_since_boot(get_absolute_time()) - capture_start) < LINE_CAPTURE_DURATION_MS) {
+
+        while ((to_ms_since_boot(get_absolute_time()) - capture_start) <
+               LINE_CAPTURE_DURATION_MS) {
             uint64_t now = time_us_64();
             float dt = (now - last_capture_time) / 1e6f;
             if (dt < 0.001f) dt = 0.02f;
             last_capture_time = now;
-            
+
             uint16_t adc_raw = read_line_adc();
             float raw_error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
             float error = raw_error;
-            
+
             float abs_error = abs_float(error);
             bool in_corner = (abs_error > CORNER_ERROR_THRESHOLD);
             float steer_correction = pid_compute(&capture_pid, error, dt);
-            
+
             if (in_corner) {
-                float corner_intensity = (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
+                float corner_intensity =
+                    (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
                 if (corner_intensity > 1.0f) corner_intensity = 1.0f;
-                float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) * corner_intensity;
+                float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) *
+                                      corner_intensity;
                 steer_correction *= gain;
             }
-            
+
             int base_pwm;
             if (in_corner) {
                 base_pwm = PWM_MIN_LEFT - CORNER_SPEED_REDUCTION;
@@ -333,12 +344,13 @@ static void gentle_search_for_line(void) {
             } else {
                 base_pwm = PWM_MIN_LEFT;
             }
-            
-            float effective_scale = in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
+
+            float effective_scale =
+                in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
             int pwm_adjustment = (int)(steer_correction * effective_scale);
             int pwmL = base_pwm + pwm_adjustment;
             int pwmR = base_pwm - pwm_adjustment;
-            
+
             if (in_corner) {
                 int actual_diff = pwmL - pwmR;
                 int abs_diff = (actual_diff < 0) ? -actual_diff : actual_diff;
@@ -349,64 +361,144 @@ static void gentle_search_for_line(void) {
                     pwmR -= sign * needed;
                 }
             }
-            
+
             pwmL = clamp_pwm_left(pwmL);
             pwmR = clamp_pwm_right(pwmR);
-            
+
             disable_pid_control();
             forward_motor_manual(pwmL, pwmR);
-            
+
             // Check for stable line lock
             if (abs_error < 200) {
                 stable_readings++;
                 if (stable_readings >= REQUIRED_STABLE) {
-                    printf("[CAPTURE] ✓✓ LINE LOCK CONFIRMED after %d stable readings!\n", stable_readings);
+                    printf("[CAPTURE] ✓✓ LINE LOCK CONFIRMED after %d stable readings!\n",
+                           stable_readings);
                     break;
                 }
             } else {
                 if (stable_readings > 0) stable_readings--;
             }
-            
+
             // Telemetry
             if (reading_count++ % 5 == 0) {
                 const char *mode = in_corner ? "CORNER" : "STRAIGHT";
-                const char *direction = (error > 0) ? "LEFT" : (error < 0) ? "RIGHT" : "STRAIGHT";
-                const char *zone = (adc_raw < 400) ? "WHITE" : (adc_raw > 2200) ? "BLACK" : "EDGE";
+                const char *direction =
+                    (error > 0) ? "LEFT" : (error < 0) ? "RIGHT" : "STRAIGHT";
+                const char *zone =
+                    (adc_raw < 400) ? "WHITE" :
+                    (adc_raw > 2200) ? "BLACK" : "EDGE";
                 int pwm_diff = pwmL - pwmR;
-                
-                printf("[CAPTURE-%s] ADC=%u(%s) err=%+.0f %s pwmL=%d pwmR=%d diff=%d stable=%d\n",
-                       mode, adc_raw, zone, (double)error, direction, pwmL, pwmR, pwm_diff, stable_readings);
-                
+
+                printf("[CAPTURE-%s] ADC=%u(%s) err=%+.0f %s pwmL=%d pwmR=%d "
+                       "diff=%d stable=%d\n",
+                       mode, adc_raw, zone, (double)error,
+                       direction, pwmL, pwmR, pwm_diff, stable_readings);
+
                 snprintf(msg, sizeof(msg),
-                         "{\"event\":\"line_capture\",\"adc\":%u,\"zone\":\"%s\",\"error\":%.0f,\"mode\":\"%s\",\"direction\":\"%s\",\"pwm_left\":%d,\"pwm_right\":%d,\"diff\":%d,\"stable\":%d}",
-                         adc_raw, zone, (double)error, mode, direction, pwmL, pwmR, pwm_diff, stable_readings);
+                         "{\"event\":\"line_capture\",\"adc\":%u,\"zone\":\"%s\","
+                         "\"error\":%.0f,\"mode\":\"%s\",\"direction\":\"%s\","
+                         "\"pwm_left\":%d,\"pwm_right\":%d,\"diff\":%d,"
+                         "\"stable\":%d}",
+                         adc_raw, zone, (double)error, mode, direction,
+                         pwmL, pwmR, pwm_diff, stable_readings);
                 mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
             }
-            
+
             sleep_ms(20);
         }
-        
+
         stop_motor_pid();
         sleep_ms(200);
-        
+
         printf("[GENTLE] ✓ Line capture complete! Transitioning to edge following.\n");
         uint16_t final_adc = read_line_adc();
-        printf("[GENTLE] Final ADC: %u (target: %d)\n\n", final_adc, TARGET_EDGE_VALUE);
-        
+        printf("[GENTLE] Final ADC: %u (target: %d)\n\n",
+               final_adc, TARGET_EDGE_VALUE);
+
         snprintf(msg, sizeof(msg),
-                 "{\"event\":\"line_capture_complete\",\"final_adc\":%u,\"target\":%d,\"stable_readings\":%d}",
+                 "{\"event\":\"line_capture_complete\",\"final_adc\":%u,"
+                 "\"target\":%d,\"stable_readings\":%d}",
                  final_adc, TARGET_EDGE_VALUE, stable_readings);
         mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
-        
+
     } else {
-        printf("[GENTLE] ✗ Line not found after %d ms - stopping.\n\n", 
+        printf("[GENTLE] ✗ Line not found after %d ms - stopping.\n\n",
                GENTLE_SEARCH_MAX_TIME_MS);
-        
+
         snprintf(msg, sizeof(msg),
                  "{\"event\":\"gentle_search_failed\",\"max_time_ms\":%u}",
                  GENTLE_SEARCH_MAX_TIME_MS);
         mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
     }
+}
+
+
+static void run_width_scan_and_publish(float adjacent) {
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════════════════════╗\n");
+    printf("║ *** OBSTACLE DETECTED ***                                         ║\n");
+    printf("║ Perpendicular Distance: %.2f cm                                   ║\n", adjacent);
+    printf("╚════════════════════════════════════════════════════════════════════╝\n");
+
+    if (adjacent > MIN_DISTANCE_FOR_WIDTH_SCAN) {
+        printf("\n[SCAN] Distance %.2f cm > %.2f cm - TOO FAR for reliable width measurement\n",
+               adjacent, MIN_DISTANCE_FOR_WIDTH_SCAN);
+        printf("[SCAN] Skipping width scan - ultrasonic not reliable at this distance\n");
+
+        if (mqtt_is_connected()) {
+            char json[200];
+            uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
+            int n = snprintf(json, sizeof(json),
+                             "{\"ts\":%u,\"adjacent\":%.2f,\"leftWidth\":0.00,"
+                             "\"rightWidth\":0.00,\"totalWidth\":0.00,\"note\":\"too_far\"}",
+                             (unsigned)ts_ms, (double)adjacent);
+            if (n > 0 && n < (int)sizeof(json)) {
+                mqtt_publish_str(MQTT_TOPIC_OBSTACLE, json);
+            }
+        }
+
+        servo_set_angle(SERVO_CENTER_ANGLE);
+        return;
+    }
+
+    printf("[SCAN] Distance %.2f cm < %.2f cm - GOOD for width measurement\n",
+           adjacent, MIN_DISTANCE_FOR_WIDTH_SCAN);
+    printf("Waiting %dms for system to stabilize.\n", INITIAL_STOP_DELAY_MS);
+    servo_set_angle(SERVO_CENTER_ANGLE);
+    sleep_ms(INITIAL_STOP_DELAY_MS);
+
+    // Use ultrasonic module's scan helpers
+    float left_w  = ultrasonic_scan_left_side(adjacent);
+    sleep_ms(500);
+    float right_w = ultrasonic_scan_right_side(adjacent);
+    float total_w = left_w + right_w;
+
+    printf("\n[RESULT] LEFT=%.2f cm, RIGHT=%.2f cm → TOTAL WIDTH=%.2f cm\n",
+           left_w, right_w, total_w);
+
+    if (mqtt_is_connected()) {
+        char json[200];
+        uint32_t ts_ms = to_ms_since_boot(get_absolute_time());
+        int n = snprintf(json, sizeof(json),
+                         "{\"ts\":%u,\"adjacent\":%.2f,\"leftWidth\":%.2f,"
+                         "\"rightWidth\":%.2f,\"totalWidth\":%.2f}",
+                         (unsigned)ts_ms,
+                         (double)adjacent,
+                         (double)left_w,
+                         (double)right_w,
+                         (double)total_w);
+        if (n > 0 && n < (int)sizeof(json)) {
+            mqtt_publish_str(MQTT_TOPIC_OBSTACLE, json);
+        }
+    }
+
+    servo_set_angle(SERVO_CENTER_ANGLE);
+    sleep_ms(300);
+
+    printf("\n[SCAN] Obstacle measurement complete\n");
+    printf("[SCAN] LEFT: %.2f cm, RIGHT: %.2f cm, TOTAL: %.2f cm\n",
+           left_w, right_w, total_w);
 }
 
 /* ======== Edge Following Task ======== */
@@ -435,22 +527,22 @@ static void edgeFollowTask(void *pvParameters) {
         obstacle_check_counter++;
         if (obstacle_check_counter >= OBSTACLE_CHECK_INTERVAL) {
             obstacle_check_counter = 0;
-            
+
             float center_cm = ultrasonic_get_distance_cm();
             if (center_cm > 0.0f && center_cm <= OBSTACLE_THRESHOLD_CM) {
                 printf("[EDGE] Obstacle at %.1f cm, stopping...\n", center_cm);
                 disable_pid_control();
                 stop_motor_pid();
-                
-                // Run width scan and avoidance sequence
-                ultrasonic_run_width_scan_and_avoid(center_cm);
-                
+
+                // Run width scan and publish EXACT same JSON as testDemo3.c
+                run_width_scan_and_publish(center_cm);
+
                 // Execute 90-degree right turn
                 motor_turn_right_90();
-                
+
                 // Search for line with gentle arc
                 gentle_search_for_line();
-                
+
                 servo_set_angle(SERVO_CENTER_ANGLE);
                 vTaskDelay(pdMS_TO_TICKS(200));
                 last_time = time_us_64();
@@ -484,19 +576,21 @@ static void edgeFollowTask(void *pvParameters) {
         float steer_correction = pid_compute(&steer_pid, error, dt);
 
         if (in_corner) {
-            float corner_intensity = (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
+            float corner_intensity =
+                (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
             if (corner_intensity > 1.0f) corner_intensity = 1.0f;
-            float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) * corner_intensity;
+            float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) *
+                                  corner_intensity;
             steer_correction *= gain;
         }
-        
+
         if (g_avoidance_cooldown_steps > 0) {
             g_avoidance_cooldown_steps--;
             if (steer_correction < 0.0f) {
                 steer_correction *= 0.3f;
             }
         }
-        
+
         int base_pwm;
         if (in_corner) {
             base_pwm = PWM_MIN_LEFT - CORNER_SPEED_REDUCTION;
@@ -505,7 +599,8 @@ static void edgeFollowTask(void *pvParameters) {
             base_pwm = PWM_MIN_LEFT;
         }
 
-        float effective_scale = in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
+        float effective_scale =
+            in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
         int pwm_adjustment = (int)(steer_correction * effective_scale);
         int pwmL = base_pwm + pwm_adjustment;
         int pwmR = base_pwm - pwm_adjustment;
@@ -531,15 +626,19 @@ static void edgeFollowTask(void *pvParameters) {
 
         if ((telem_counter++ % 10) == 0) {
             const char *mode = in_corner ? "CORNER" : "STRAIGHT";
-            const char *follow_mode = (LINE_FOLLOWING_MODE == 0) ? "CENTER" : "EDGE";
-            const char *edge_dir = (g_current_edge_direction > 0) ? "LEFT" : "RIGHT";
+            const char *follow_mode =
+                (LINE_FOLLOWING_MODE == 0) ? "CENTER" : "EDGE";
+            const char *edge_dir =
+                (g_current_edge_direction > 0) ? "LEFT" : "RIGHT";
             bool turning_left = (error > 0);
             bool turning_right = (error < 0);
-            const char *direction = turning_left ? "LEFT" : (turning_right ? "RIGHT" : "STRAIGHT");
+            const char *direction =
+                turning_left ? "LEFT" : (turning_right ? "RIGHT" : "STRAIGHT");
             int pwm_diff = pwmL - pwmR;
-            
+
             printf("[%s-%s] ADC=%u err=%+.0f %s %s pwmL=%d pwmR=%d diff=%d\n",
-                   follow_mode, edge_dir, adc_raw, (double)error, mode, direction, pwmL, pwmR, pwm_diff);
+                   follow_mode, edge_dir, adc_raw, (double)error,
+                   mode, direction, pwmL, pwmR, pwm_diff);
 
             if (mqtt_is_connected()){
                 char json[384];
@@ -548,8 +647,8 @@ static void edgeFollowTask(void *pvParameters) {
 
                 n = snprintf(json, sizeof(json),
                     "{\"timestamp\":%u,\"adc\":%u,\"target\":%d,\"error\":%.1f,"
-                    "\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\","
-                    "\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
+                    "\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\","
+                    "\"edge\":\"%s\",\"pwmL\":%d,\"pwmR\":%d,\"diff\":%d,"
                     "\"speedL\":%.2f,\"speedR\":%.2f,\"inCorner\":%s}",
                     (unsigned)ts_ms, adc_raw, TARGET_EDGE_VALUE,
                     (double)error, mode, direction, follow_mode, edge_dir,
@@ -575,8 +674,10 @@ static void edgeFollowTask(void *pvParameters) {
 
                 if (telem_counter % 50 == 0) {
                     n = snprintf(json, sizeof(json),
-                        "{\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\",\"edge\":\"%s\",\"corner\":%s}",
-                        mode, direction, follow_mode, edge_dir, in_corner ? "true" : "false");
+                        "{\"mode\":\"%s\",\"direction\":\"%s\",\"follow\":\"%s\","
+                        "\"edge\":\"%s\",\"corner\":%s}",
+                        mode, direction, follow_mode, edge_dir,
+                        in_corner ? "true" : "false");
                     if (n > 0 && n < (int)sizeof(json)) {
                         mqtt_publish_str(MQTT_TOPIC_STATUS, json);
                     }
