@@ -9,8 +9,5 @@ target_include_directories(servo_lib PUBLIC
 target_link_libraries(servo_lib
   pico_stdlib
   hardware_gpio
-  hardware_timer
   hardware_pwm
-  FreeRTOS-Kernel
-  FreeRTOS-Kernel-Heap4
 )

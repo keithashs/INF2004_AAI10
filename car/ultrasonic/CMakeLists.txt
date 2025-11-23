@@ -11,7 +11,4 @@ target_link_libraries(ultrasonic_lib
   pico_stdlib
   hardware_gpio
   hardware_timer
-  hardware_pwm
-  FreeRTOS-Kernel
-  FreeRTOS-Kernel-Heap4
 )

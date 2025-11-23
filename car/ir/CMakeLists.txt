@@ -10,4 +10,5 @@ target_link_libraries(ir_linefollow_lib
     pico_stdlib
     hardware_gpio
     hardware_adc
+    motor_lib
 )
