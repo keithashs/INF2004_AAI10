@@ -123,7 +123,7 @@ https://mosquitto.org/download/
 download this:
 mosquitto-2.0.22-install-windows x64.exe
 
- Error: Only one usage of each socket address (protocol/network address/port) is normally permitted.
+Error: Only one usage of each socket address (protocol/network address/port) is normally permitted.
 admin cmd
 netstat -ano | find "1883"
 tasklist | find "mosquitto"
@@ -153,20 +153,7 @@ window firewall defender
 mosquitto -v
 mosquitto_sub -h localhost -t test
 mosquitto_pub -h localhost -t test -m "hello"
+
+node-red
 http://127.0.0.1:1880
 http://127.0.0.1:1880/ui/
-node-red
-
-
-// --- Wi-Fi & MQTT ---
-#define WIFI_SSID                 "Keithiphone"
-#define WIFI_PASS                 "testong1"
-// #define WIFI_SSID                 "Jared"
-// #define WIFI_PASS                 "1teddygodie"
-// #define WIFI_SSID                 "Oppo"
-// #define WIFI_PASS                 "happy1234"
-#define WIFI_CONNECT_TIMEOUT_MS   20000
-
-#define BROKER_IP_STR             "172.20.10.3"
-// #define BROKER_IP_STR             "10.22.173.48"
-// #define BROKER_IP_STR             "10.86.216.48"
