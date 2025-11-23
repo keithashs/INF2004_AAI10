@@ -4,7 +4,6 @@ if (NOT PICO_NO_HARDWARE)
     add_subdirectory(imu)
     add_subdirectory(ir)
     add_subdirectory(barcode)
-    add_subdirectory(wifi) # builds a separate TCP server example executable
     add_subdirectory(demos)
     add_subdirectory(main)
     add_subdirectory(ultrasonic)
