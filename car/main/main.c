@@ -35,10 +35,13 @@
 #define WIFI_PASS                 "testong1"
 // #define WIFI_SSID                 "Jared"
 // #define WIFI_PASS                 "1teddygodie"
+// #define WIFI_SSID                 "Oppo"
+// #define WIFI_PASS                 "happy1234"
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 
 #define BROKER_IP_STR             "172.20.10.3"
 // #define BROKER_IP_STR             "10.22.173.149"
+// #define BROKER_IP_STR             "10.86.216.48"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/main/telemetry"
 #define MQTT_TOPIC_STATUS         "pico/main/status"
@@ -49,8 +52,8 @@
 
 // ======== SERVO SCAN ANGLES ========
 #define SERVO_CENTER_ANGLE          90.0f
-#define SERVO_RIGHT_ANGLE           150.0f
-#define SERVO_LEFT_ANGLE            35.0f
+#define SERVO_RIGHT_ANGLE           120.0f
+#define SERVO_LEFT_ANGLE            60.0f
 
 // ======== OBSTACLE DETECTION CONFIG ========
 #define OBSTACLE_THRESHOLD_CM       20.0f
@@ -62,8 +65,9 @@
 #define GENTLE_SEARCH_MAX_TIME_MS   20000
 #define LINE_EDGE_MIN_ADC           1000
 #define LINE_EDGE_MAX_ADC           2500
-#define LINE_CAPTURE_DURATION_MS    4000
-#define LINE_CAPTURE_BASE_PWM       135
+#define LINE_CAPTURE_DURATION_MS    4000   // Moderate duration to prevent overshoot
+#define LINE_CAPTURE_BASE_PWM       95     // Very low base speed for precise control
+#define TRANSITION_DURATION_MS      2000   // Smooth ramp-up after capture
 
 // ======== HEADING FILTER CONFIG (IMU) ========
 #define HDG_EMA_ALPHA        0.20f
@@ -294,31 +298,105 @@ static void gentle_search_for_line(void) {
         uint16_t detection_adc = read_line_adc();
         printf("[GENTLE] ✓ Line detected! ADC=%u\n", detection_adc);
 
-        // IMMEDIATE BRAKE
+        // IMMEDIATE REACTION based on detection position
+        if (detection_adc > 2500) {
+            // Detected DEEP IN BLACK - perpendicular crossing!
+            printf("[GENTLE] PERPENDICULAR CROSSING! ADC=%u - HARD RIGHT NOW!\n", detection_adc);
+            
+            // EMERGENCY RIGHT TURN to find edge
+            forward_motor_manual(180, 60);  // Hard right
+            sleep_ms(150);  // Brief but aggressive
+            
+            // Check if we found edge
+            uint16_t check_adc = read_line_adc();
+            printf("[GENTLE] After emergency turn: ADC=%u\n", check_adc);
+            
+            // If still in black, continue turning
+            while (check_adc > 2000) {
+                forward_motor_manual(165, 70);
+                sleep_ms(50);
+                check_adc = read_line_adc();
+                printf("[GENTLE] Still in black: ADC=%u, continuing right turn...\n", check_adc);
+                
+                // Safety timeout
+                static int turn_cycles = 0;
+                if (++turn_cycles > 10) {
+                    printf("[GENTLE] Emergency turn timeout!\n");
+                    break;
+                }
+            }
+            
+            stop_motor_pid();
+            sleep_ms(100);
+            detection_adc = read_line_adc();
+            printf("[GENTLE] Repositioned to ADC=%u\n", detection_adc);
+        }
+
+        // Now execute controlled approach to settle on edge
+        printf("[GENTLE] Starting controlled approach from ADC=%u...\n", detection_adc);
+        
+        // Phase 1.5: Controlled approach to settle on edge (1000ms - extended for perpendicular)
+        uint32_t approach_start = to_ms_since_boot(get_absolute_time());
+        int approach_stable = 0;
+        bool edge_locked = false;
+        
+        while ((to_ms_since_boot(get_absolute_time()) - approach_start) < 1000) {
+            uint16_t adc = read_line_adc();
+            
+            // Smart corrections based on current position
+            if (adc < 800) {
+                // Far on white → Need to find line again with left turn
+                forward_motor_manual(75, 140);
+                printf("[APPROACH] FAR WHITE(ADC=%u) → SEARCH LEFT\n", adc);
+                approach_stable = 0;
+            } else if (adc >= 800 && adc < 1400) {
+                // Approaching from white → moderate left to reach edge
+                forward_motor_manual(85, 130);
+                if (reading_count++ % 5 == 0) {
+                    printf("[APPROACH] APPROACHING(ADC=%u) → TURN LEFT\n", adc);
+                }
+                approach_stable = 0;
+            } else if (adc >= 1400 && adc < 1600) {
+                // Near edge from below → gentle left
+                forward_motor_manual(95, 115);
+                approach_stable++;
+            } else if (adc >= 1600 && adc <= 2000) {
+                // PERFECT EDGE ZONE → minimal movement to hold
+                forward_motor_manual(110, 105);
+                approach_stable++;
+                edge_locked = true;
+                if (approach_stable >= 8) {
+                    printf("[APPROACH] ✓ EDGE LOCKED at ADC=%u!\n", adc);
+                    break;
+                }
+            } else if (adc > 2000 && adc <= 2300) {
+                // Near edge from above → gentle right
+                forward_motor_manual(115, 95);
+                approach_stable = 0;
+            } else if (adc > 2300) {
+                // Too far in black → strong right turn to exit
+                forward_motor_manual(145, 75);
+                printf("[APPROACH] DEEP BLACK(ADC=%u) → TURN RIGHT\n", adc);
+                approach_stable = 0;
+            }
+            
+            if (reading_count++ % 3 == 0) {
+                const char* zone = (adc < 800) ? "WHITE" : 
+                                   (adc < 1400) ? "APPROACH" :
+                                   (adc >= 1600 && adc <= 2000) ? "EDGE-LOCK" : 
+                                   (adc > 2300) ? "BLACK" : "EDGE";
+                printf("[APPROACH] ADC=%u (%s) stable=%d\n", adc, zone, approach_stable);
+            }
+            
+            sleep_ms(20);
+        }
+        
         stop_motor_pid();
-        sleep_ms(250);
-
-        // Smart positioning
-        uint16_t post_brake_adc = read_line_adc();
-        int post_brake_error = (int)post_brake_adc - TARGET_EDGE_VALUE;
-        printf("[GENTLE] Post-brake position: ADC=%u, error=%+d\n",
-               post_brake_adc, post_brake_error);
-
-        // Corrective maneuvers
-        if (post_brake_adc > TARGET_EDGE_VALUE + 800) {
-            printf("[GENTLE] Overshot into black! Reversing left to find edge...\n");
-            forward_motor_manual(165, PWM_MIN_RIGHT);
-            sleep_ms(250);
-            stop_motor_pid();
-            sleep_ms(100);
-        }
-        else if (post_brake_adc < TARGET_EDGE_VALUE - 800) {
-            printf("[GENTLE] On white! Turning right to find edge...\n");
-            forward_motor_manual(PWM_MIN_LEFT, 165);
-            sleep_ms(250);
-            stop_motor_pid();
-            sleep_ms(100);
-        }
+        sleep_ms(100);
+        
+        uint16_t post_approach_adc = read_line_adc();
+        printf("[GENTLE] After approach: ADC=%u (target: %d) locked=%s\n",
+               post_approach_adc, TARGET_EDGE_VALUE, edge_locked ? "YES" : "NO");
 
         // PHASE 2: Aggressive edge-following
         printf("[GENTLE] Phase 2: Aggressive edge-following for %d ms\n",
@@ -326,6 +404,12 @@ static void gentle_search_for_line(void) {
 
         PIDController capture_pid;
         pid_init(&capture_pid, KP_STEER, KI_STEER, KD_STEER);
+        
+        // Pre-warm PID with current position
+        uint16_t warmup_adc = read_line_adc();
+        float warmup_error = (float)((int)warmup_adc - TARGET_EDGE_VALUE);
+        pid_compute(&capture_pid, warmup_error, 0.02f);
+        printf("[CAPTURE] PID pre-warmed with error=%.0f\n", (double)warmup_error);
 
         uint64_t last_capture_time = time_us_64();
         uint32_t capture_start = to_ms_since_boot(get_absolute_time());
@@ -348,47 +432,55 @@ static void gentle_search_for_line(void) {
             float steer_correction = pid_compute(&capture_pid, error, dt);
 
             if (in_corner) {
+                // Reduced corner gain to prevent wild swings
                 float corner_intensity =
-                    (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
+                    (abs_error - CORNER_ERROR_THRESHOLD) / 800.0f;  // Was 500
                 if (corner_intensity > 1.0f) corner_intensity = 1.0f;
-                float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) *
-                                      corner_intensity;
+                float gain = 1.0f + 0.3f * corner_intensity;  // Max 1.3x gain (was 1.6x)
                 steer_correction *= gain;
             }
 
-            int base_pwm;
+            // Use fixed lower base speed for capture phase
+            int base_pwm = LINE_CAPTURE_BASE_PWM;  // 110 PWM
+            
             if (in_corner) {
-                base_pwm = PWM_MIN_LEFT - CORNER_SPEED_REDUCTION;
-                if (base_pwm < PWM_MIN_LEFT) base_pwm = PWM_MIN_LEFT;
-            } else {
-                base_pwm = PWM_MIN_LEFT;
+                base_pwm -= (CORNER_SPEED_REDUCTION / 2);  // Gentler slow-down
+                if (base_pwm < 80) base_pwm = 80;  // Prevent stalling
             }
 
-            float effective_scale =
-                in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
+            // Gentler PWM scaling during capture
+            float effective_scale = in_corner ? 18.0f : 15.0f;  // Reduced from 25-32.5
             int pwm_adjustment = (int)(steer_correction * effective_scale);
             int pwmL = base_pwm + pwm_adjustment;
             int pwmR = base_pwm - pwm_adjustment;
 
-            if (in_corner) {
-                int actual_diff = pwmL - pwmR;
-                int abs_diff = (actual_diff < 0) ? -actual_diff : actual_diff;
-                if (abs_diff < MIN_CORNER_PWM_DIFF) {
-                    int sign = (actual_diff > 0) ? 1 : -1;
-                    int needed = (MIN_CORNER_PWM_DIFF - abs_diff) / 2;
-                    pwmL += sign * needed;
-                    pwmR -= sign * needed;
-                }
+            // Clamp BEFORE enforcing differential
+            if (pwmL < 60) pwmL = 60;   // Prevent motor stall
+            if (pwmL > 180) pwmL = 180;
+            if (pwmR < 60) pwmR = 60;
+            if (pwmR > 180) pwmR = 180;
+            
+            // Ensure minimum speed difference for turns
+            int actual_diff = pwmL - pwmR;
+            int abs_diff = (actual_diff < 0) ? -actual_diff : actual_diff;
+            if (abs_diff < 30 && abs_error > 400) {  // Only enforce on large errors
+                int sign = (actual_diff > 0) ? 1 : -1;
+                int boost = (30 - abs_diff) / 2;
+                pwmL += sign * boost;
+                pwmR -= sign * boost;
+                
+                // Re-clamp after adjustment
+                if (pwmL < 60) pwmL = 60;
+                if (pwmL > 180) pwmL = 180;
+                if (pwmR < 60) pwmR = 60;
+                if (pwmR > 180) pwmR = 180;
             }
-
-            pwmL = clamp_pwm_left(pwmL);
-            pwmR = clamp_pwm_right(pwmR);
 
             disable_pid_control();
             forward_motor_manual(pwmL, pwmR);
 
-            // Check for stable line lock
-            if (abs_error < 200) {
+            // Check for stable line lock (stricter criteria)
+            if (abs_error < 150) {  // Tighter tolerance
                 stable_readings++;
                 if (stable_readings >= REQUIRED_STABLE) {
                     printf("[CAPTURE] ✓✓ LINE LOCK CONFIRMED after %d stable readings!\n",
@@ -396,7 +488,7 @@ static void gentle_search_for_line(void) {
                     break;
                 }
             } else {
-                if (stable_readings > 0) stable_readings--;
+                stable_readings = 0;  // Reset completely on instability
             }
 
             // Telemetry
@@ -430,16 +522,104 @@ static void gentle_search_for_line(void) {
         stop_motor_pid();
         sleep_ms(200);
 
-        printf("[GENTLE] ✓ Line capture complete! Transitioning to edge following.\n");
+        printf("[GENTLE] ✓ Line capture complete! Starting transition phase...\n");
         uint16_t final_adc = read_line_adc();
-        printf("[GENTLE] Final ADC: %u (target: %d)\n\n",
+        printf("[GENTLE] Final ADC: %u (target: %d)\n",
                final_adc, TARGET_EDGE_VALUE);
 
+        // ===== TRANSITION PHASE: Gradual speed ramp-up for smooth rejoin =====
+        printf("[GENTLE] Phase 3: Transition to full-speed edge following (%d ms)\n",
+               TRANSITION_DURATION_MS);
+
+        PIDController transition_pid;
+        pid_init(&transition_pid, KP_STEER, KI_STEER, KD_STEER);
+
+        uint64_t last_transition_time = time_us_64();
+        uint32_t transition_start = to_ms_since_boot(get_absolute_time());
+        int transition_stable = 0;
+
+        while ((to_ms_since_boot(get_absolute_time()) - transition_start) <
+               TRANSITION_DURATION_MS) {
+            uint64_t now = time_us_64();
+            float dt = (now - last_transition_time) / 1e6f;
+            if (dt < 0.001f) dt = 0.02f;
+            last_transition_time = now;
+
+            uint16_t adc_raw = read_line_adc();
+            float raw_error = (float)((int)adc_raw - TARGET_EDGE_VALUE);
+            float error = raw_error;
+            float abs_error = abs_float(error);
+
+            bool in_corner = (abs_error > CORNER_ERROR_THRESHOLD);
+            float steer_correction = pid_compute(&transition_pid, error, dt);
+
+            if (in_corner) {
+                float corner_intensity =
+                    (abs_error - CORNER_ERROR_THRESHOLD) / 500.0f;
+                if (corner_intensity > 1.0f) corner_intensity = 1.0f;
+                float gain = 1.0f + (CORNER_GAIN_MULTIPLIER - 1.0f) *
+                                      corner_intensity;
+                steer_correction *= gain;
+            }
+
+            // Gradual speed ramp: start at 80 PWM, ramp to full speed (PWM_MIN_LEFT)
+            float progress = (float)(to_ms_since_boot(get_absolute_time()) - transition_start) / TRANSITION_DURATION_MS;
+            int base_pwm = (int)(80 + (PWM_MIN_LEFT - 80) * progress);
+
+            if (in_corner) {
+                base_pwm -= CORNER_SPEED_REDUCTION;
+                if (base_pwm < PWM_MIN_LEFT) base_pwm = PWM_MIN_LEFT;
+            }
+
+            float effective_scale =
+                in_corner ? (PWM_SCALE_FACTOR * 1.3f) : PWM_SCALE_FACTOR;
+            int pwm_adjustment = (int)(steer_correction * effective_scale);
+            int pwmL = base_pwm + pwm_adjustment;
+            int pwmR = base_pwm - pwm_adjustment;
+
+            pwmL = clamp_pwm_left(pwmL);
+            pwmR = clamp_pwm_right(pwmR);
+
+            disable_pid_control();
+            forward_motor_manual(pwmL, pwmR);
+
+            // Check stability
+            if (abs_error < 250) {
+                transition_stable++;
+            } else {
+                transition_stable = 0;
+            }
+
+            // Early exit if very stable
+            if (transition_stable >= 20) {
+                printf("[TRANSITION] ✓ Stable lock achieved early!\n");
+                break;
+            }
+
+            if (reading_count++ % 10 == 0) {
+                printf("[TRANSITION] ADC=%u err=%+.0f base_pwm=%d pwmL=%d pwmR=%d stable=%d\n",
+                       adc_raw, (double)error, base_pwm, pwmL, pwmR, transition_stable);
+            }
+
+            sleep_ms(20);
+        }
+
+        stop_motor_pid();
+        sleep_ms(100);
+
+        printf("[GENTLE] ✓✓ FULL REJOIN COMPLETE! Returning to normal edge following.\n\n");
+        uint16_t rejoin_adc = read_line_adc();
+        printf("[GENTLE] Rejoin ADC: %u (target: %d)\n\n",
+               rejoin_adc, TARGET_EDGE_VALUE);
+
         snprintf(msg, sizeof(msg),
-                 "{\"event\":\"line_capture_complete\",\"final_adc\":%u,"
-                 "\"target\":%d,\"stable_readings\":%d}",
-                 final_adc, TARGET_EDGE_VALUE, stable_readings);
+                 "{\"event\":\"line_rejoin_complete\",\"final_adc\":%u,"
+                 "\"rejoin_adc\":%u,\"target\":%d,\"stable_readings\":%d,\"transition_stable\":%d}",
+                 final_adc, rejoin_adc, TARGET_EDGE_VALUE, stable_readings, transition_stable);
         mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
+
+        // Reset avoidance cooldown to allow immediate corrections
+        g_avoidance_cooldown_steps = 0;
 
     } else {
         printf("[GENTLE] ✗ Line not found after %d ms - stopping.\n\n",
@@ -578,6 +758,7 @@ static void edgeFollowTask(void *pvParameters) {
                 // Search for line with gentle arc
                 gentle_search_for_line();
 
+                printf("[EDGE] Line rejoin complete, resuming normal edge following...\n");
                 servo_set_angle(SERVO_CENTER_ANGLE);
                 vTaskDelay(pdMS_TO_TICKS(200));
                 last_time = time_us_64();
