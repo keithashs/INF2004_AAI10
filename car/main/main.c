@@ -40,7 +40,7 @@
 #define WIFI_CONNECT_TIMEOUT_MS   20000
 
 #define BROKER_IP_STR             "172.20.10.3"
-// #define BROKER_IP_STR             "10.22.173.149"
+// #define BROKER_IP_STR             "10.22.173.48"
 // #define BROKER_IP_STR             "10.86.216.48"
 #define BROKER_PORT               1883
 #define MQTT_TOPIC_TELEM          "pico/main/telemetry"
@@ -52,8 +52,8 @@
 
 // ======== SERVO SCAN ANGLES ========
 #define SERVO_CENTER_ANGLE          90.0f
-#define SERVO_RIGHT_ANGLE           120.0f
-#define SERVO_LEFT_ANGLE            60.0f
+#define SERVO_RIGHT_ANGLE           135.0f
+#define SERVO_LEFT_ANGLE            10.0f
 
 // ======== OBSTACLE DETECTION CONFIG ========
 #define OBSTACLE_THRESHOLD_CM       20.0f
@@ -63,7 +63,7 @@
 #define GENTLE_TURN_PWM_LEFT        90
 #define GENTLE_TURN_PWM_RIGHT       125
 #define GENTLE_SEARCH_MAX_TIME_MS   20000
-#define LINE_EDGE_MIN_ADC           1000
+#define LINE_EDGE_MIN_ADC           800    // Lowered for earlier detection
 #define LINE_EDGE_MAX_ADC           2500
 #define LINE_CAPTURE_DURATION_MS    4000   // Moderate duration to prevent overshoot
 #define LINE_CAPTURE_BASE_PWM       95     // Very low base speed for precise control
@@ -287,7 +287,7 @@ static void gentle_search_for_line(void) {
         }
 
         // Gentle left turn: left motor slower, right motor faster
-        forward_motor_manual(GENTLE_TURN_PWM_LEFT, GENTLE_TURN_PWM_RIGHT);
+        forward_motor_manual(100, 120);
         sleep_ms(20);
     }
 
@@ -297,6 +297,68 @@ static void gentle_search_for_line(void) {
     if (found) {
         uint16_t detection_adc = read_line_adc();
         printf("[GENTLE] ✓ Line detected! ADC=%u\n", detection_adc);
+
+        // === FAST DIRECTIONAL ANALYSIS: Determine which way to turn ===
+        // After 90° right turn, we're perpendicular to track
+        // Use quick, gentle sampling to avoid overshooting
+        
+        printf("[GENTLE] Fast direction analysis...\n");
+        stop_motor_pid();
+        sleep_ms(50);  // Shorter stabilization
+        
+        // Baseline position
+        uint16_t baseline_pos = read_line_adc();
+        
+        // Quick left sample with VERY gentle turn (50ms only)
+        forward_motor_manual(90, 120);  // Gentler than before
+        sleep_ms(50);  // Much shorter
+        uint16_t left_sample = read_line_adc();
+        
+        stop_motor_pid();
+        sleep_ms(30);
+        
+        // Return to baseline position
+        forward_motor_manual(120, 90);
+        sleep_ms(50);
+        stop_motor_pid();
+        sleep_ms(30);
+        
+        // Quick right sample with VERY gentle turn (50ms only)
+        forward_motor_manual(120, 90);  // Gentler than before
+        sleep_ms(50);  // Much shorter
+        uint16_t right_sample = read_line_adc();
+        
+        stop_motor_pid();
+        sleep_ms(50);
+        
+        // Return to center
+        forward_motor_manual(90, 120);
+        sleep_ms(50);
+        stop_motor_pid();
+        sleep_ms(30);
+        
+        // Final position check
+        uint16_t final_pos = read_line_adc();
+        
+        // Determine direction: if left turn increased ADC more, line is on left side
+        int left_delta = (int)left_sample - (int)baseline_pos;
+        int right_delta = (int)right_sample - (int)baseline_pos;
+        bool line_on_left = (left_delta > right_delta + 150);
+        const char* preferred_direction = line_on_left ? "LEFT" : "RIGHT";
+        
+        printf("[GENTLE] Direction: base=%u left=%u(Δ%+d) right=%u(Δ%+d) final=%u → %s\n",
+               baseline_pos, left_sample, left_delta, right_sample, right_delta,
+               final_pos, preferred_direction);
+        
+        // Publish direction analysis
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "{\"event\":\"direction_analysis\",\"detection_adc\":%u,\"baseline\":%u,"
+                 "\"left_sample\":%u,\"left_delta\":%d,\"right_sample\":%u,\"right_delta\":%d,"
+                 "\"final_pos\":%u,\"preferred\":\"%s\"}",
+                 detection_adc, baseline_pos, left_sample, left_delta,
+                 right_sample, right_delta, final_pos, preferred_direction);
+        mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
 
         // IMMEDIATE REACTION based on detection position
         if (detection_adc > 2500) {
@@ -333,27 +395,35 @@ static void gentle_search_for_line(void) {
         }
 
         // Now execute controlled approach to settle on edge
-        printf("[GENTLE] Starting controlled approach from ADC=%u...\n", detection_adc);
+        printf("[GENTLE] Starting controlled approach from ADC=%u (prefer turn %s)...\n",
+               detection_adc, preferred_direction);
         
-        // Phase 1.5: Controlled approach to settle on edge (1000ms - extended for perpendicular)
+        // Phase 1.5: HIGH-SPEED controlled approach (10ms sampling = 100Hz update rate)
         uint32_t approach_start = to_ms_since_boot(get_absolute_time());
         int approach_stable = 0;
         bool edge_locked = false;
+        uint32_t max_approach_time = 1500;  // Extended to 1.5s for better recovery
         
-        while ((to_ms_since_boot(get_absolute_time()) - approach_start) < 1000) {
+        // Adjust search behavior based on preferred direction
+        int search_left_pwm_l = line_on_left ? 70 : 80;
+        int search_left_pwm_r = line_on_left ? 145 : 135;
+        
+        while ((to_ms_since_boot(get_absolute_time()) - approach_start) < max_approach_time) {
             uint16_t adc = read_line_adc();
             
-            // Smart corrections based on current position
+            // HIGH-FREQUENCY corrections based on current position
             if (adc < 800) {
-                // Far on white → Need to find line again with left turn
-                forward_motor_manual(75, 140);
-                printf("[APPROACH] FAR WHITE(ADC=%u) → SEARCH LEFT\n", adc);
+                // Far on white → Need to find line with preferred direction
+                forward_motor_manual(search_left_pwm_l, search_left_pwm_r);
+                if (reading_count++ % 10 == 0) {
+                    printf("[APPROACH] FAR WHITE(ADC=%u) → SEARCH\n", adc);
+                }
                 approach_stable = 0;
             } else if (adc >= 800 && adc < 1400) {
                 // Approaching from white → moderate left to reach edge
                 forward_motor_manual(85, 130);
-                if (reading_count++ % 5 == 0) {
-                    printf("[APPROACH] APPROACHING(ADC=%u) → TURN LEFT\n", adc);
+                if (reading_count++ % 10 == 0) {
+                    printf("[APPROACH] APPROACHING(ADC=%u)\n", adc);
                 }
                 approach_stable = 0;
             } else if (adc >= 1400 && adc < 1600) {
@@ -361,12 +431,18 @@ static void gentle_search_for_line(void) {
                 forward_motor_manual(95, 115);
                 approach_stable++;
             } else if (adc >= 1600 && adc <= 2000) {
-                // PERFECT EDGE ZONE → minimal movement to hold
-                forward_motor_manual(110, 105);
+                // PERFECT EDGE ZONE → minimal movement to hold position
+                // Bias slightly toward preferred direction to ensure forward travel
+                if (line_on_left) {
+                    forward_motor_manual(102, 112);  // Slight right bias (line on left)
+                } else {
+                    forward_motor_manual(112, 102);  // Slight left bias (line on right)
+                }
                 approach_stable++;
                 edge_locked = true;
-                if (approach_stable >= 8) {
-                    printf("[APPROACH] ✓ EDGE LOCKED at ADC=%u!\n", adc);
+                if (approach_stable >= 10) {  // Need more stable readings at high sampling
+                    printf("[APPROACH] ✓ EDGE LOCKED at ADC=%u (direction: %s)!\n",
+                           adc, preferred_direction);
                     break;
                 }
             } else if (adc > 2000 && adc <= 2300) {
@@ -376,11 +452,14 @@ static void gentle_search_for_line(void) {
             } else if (adc > 2300) {
                 // Too far in black → strong right turn to exit
                 forward_motor_manual(145, 75);
-                printf("[APPROACH] DEEP BLACK(ADC=%u) → TURN RIGHT\n", adc);
+                if (reading_count++ % 10 == 0) {
+                    printf("[APPROACH] DEEP BLACK(ADC=%u) → RIGHT\n", adc);
+                }
                 approach_stable = 0;
             }
             
-            if (reading_count++ % 3 == 0) {
+            // Telemetry at lower frequency but control at high frequency
+            if (reading_count++ % 20 == 0) {
                 const char* zone = (adc < 800) ? "WHITE" : 
                                    (adc < 1400) ? "APPROACH" :
                                    (adc >= 1600 && adc <= 2000) ? "EDGE-LOCK" : 
@@ -388,15 +467,16 @@ static void gentle_search_for_line(void) {
                 printf("[APPROACH] ADC=%u (%s) stable=%d\n", adc, zone, approach_stable);
             }
             
-            sleep_ms(20);
+            sleep_ms(10);  // HIGH SAMPLING RATE: 100Hz (was 20ms = 50Hz)
         }
         
         stop_motor_pid();
         sleep_ms(100);
         
         uint16_t post_approach_adc = read_line_adc();
-        printf("[GENTLE] After approach: ADC=%u (target: %d) locked=%s\n",
-               post_approach_adc, TARGET_EDGE_VALUE, edge_locked ? "YES" : "NO");
+        printf("[GENTLE] After approach: ADC=%u (target: %d) locked=%s direction=%s\n",
+               post_approach_adc, TARGET_EDGE_VALUE, edge_locked ? "YES" : "NO",
+               preferred_direction);
 
         // PHASE 2: Aggressive edge-following
         printf("[GENTLE] Phase 2: Aggressive edge-following for %d ms\n",
@@ -491,8 +571,8 @@ static void gentle_search_for_line(void) {
                 stable_readings = 0;  // Reset completely on instability
             }
 
-            // Telemetry
-            if (reading_count++ % 5 == 0) {
+            // Telemetry at reduced frequency
+            if (reading_count++ % 10 == 0) {
                 const char *mode = in_corner ? "CORNER" : "STRAIGHT";
                 const char *direction =
                     (error > 0) ? "LEFT" : (error < 0) ? "RIGHT" : "STRAIGHT";
@@ -516,7 +596,7 @@ static void gentle_search_for_line(void) {
                 mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
             }
 
-            sleep_ms(20);
+            sleep_ms(10);  // HIGH CAPTURE SAMPLING: 100Hz (was 20ms = 50Hz)
         }
 
         stop_motor_pid();
@@ -601,7 +681,7 @@ static void gentle_search_for_line(void) {
                        adc_raw, (double)error, base_pwm, pwmL, pwmR, transition_stable);
             }
 
-            sleep_ms(20);
+            sleep_ms(15);  // Faster transition sampling: 67Hz (was 20ms = 50Hz)
         }
 
         stop_motor_pid();
@@ -614,8 +694,10 @@ static void gentle_search_for_line(void) {
 
         snprintf(msg, sizeof(msg),
                  "{\"event\":\"line_rejoin_complete\",\"final_adc\":%u,"
-                 "\"rejoin_adc\":%u,\"target\":%d,\"stable_readings\":%d,\"transition_stable\":%d}",
-                 final_adc, rejoin_adc, TARGET_EDGE_VALUE, stable_readings, transition_stable);
+                 "\"rejoin_adc\":%u,\"target\":%d,\"stable_readings\":%d,"
+                 "\"transition_stable\":%d,\"direction\":\"%s\",\"line_side\":\"%s\"}",
+                 final_adc, rejoin_adc, TARGET_EDGE_VALUE, stable_readings,
+                 transition_stable, preferred_direction, line_on_left ? "left" : "right");
         mqtt_publish_str(MQTT_TOPIC_TELEM, msg);
 
         // Reset avoidance cooldown to allow immediate corrections
